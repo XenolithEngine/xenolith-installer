@@ -1,0 +1,48 @@
+/* Xenolith Installer design tokens — from the UI Kit.
+   Dark theme, amber accent, frosted-glass action bar. */
+:root {
+  --xeno-bg: #1a1a1a;
+  --xeno-bg-page: #0d0d0d;
+  --xeno-surface-2: #232323;
+  --xeno-surface-3: #292929;
+  --xeno-accent: #fcb400;
+  --xeno-accent-muted: #68531d;
+  --xeno-on-accent: #232323;
+  --xeno-text: #ffffff;
+  --xeno-text-secondary: #b8b8b8;
+  --xeno-text-disabled: #6b6b6b;
+  --xeno-border: rgba(255, 255, 255, 0.3);
+  --xeno-border-muted: #424242;
+  --xeno-radius-card: 10px;
+  --xeno-radius-control: 6px;
+  --xeno-font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Reset the root so host typography never leaks in (font, alignment, case,
+   direction, colour) — the burned-twice checklist. */
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: var(--xeno-font);
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: left;
+  text-transform: none;
+  direction: ltr;
+  color: var(--xeno-text);
+  background: var(--xeno-bg-page);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}

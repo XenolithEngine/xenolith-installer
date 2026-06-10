@@ -1,0 +1,22 @@
+[package]
+name = "xenolith-installer-gui"
+description = "Desktop GUI (Tauri + Svelte) for the Xenolith installer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "xenolith_installer_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+xenolith-installer-core = { path = "../core", features = ["ftp", "keyserver"] }
+tauri = { version = "2", features = [] }
+serde.workspace = true
+serde_json.workspace = true
+time = { version = "0.3", features = ["formatting"] }

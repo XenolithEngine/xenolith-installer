@@ -1,0 +1,69 @@
+name: Engine bundle
+
+# TEMPORARY (until a self-hosted forge serves engine archives): build a
+# submodule-complete source bundle of xenolith-engine from THIS repo's CI and
+# publish it as a release asset, so the installer can fetch a usable STAPPLER_ROOT
+# over plain HTTPS without the end user needing git.
+#
+# Auto-generated GitHub/Gitea source archives DO NOT include submodules — that is
+# exactly why this exists: we check out recursively and vendor them into the zip.
+on:
+  workflow_dispatch:
+    inputs:
+      engine_ref:
+        description: "xenolith-engine ref (tag or branch) to bundle"
+        default: "master"
+      release_tag:
+        description: "release tag in THIS repo to attach the bundle to"
+        default: "engine-snapshot"
+
+jobs:
+  bundle:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write # publish the bundle as a release asset
+    steps:
+      - name: Prefer HTTPS for submodules
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+      - name: Checkout xenolith-engine (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          repository: XenolithEngine/xenolith-engine
+          ref: ${{ inputs.engine_ref }}
+          submodules: recursive
+          fetch-depth: 1
+          path: src
+          # If any submodule is private or on another host, replace with a PAT:
+          # token: ${{ secrets.ENGINE_BUNDLE_TOKEN }}
+
+      - name: Vendor submodules into a clean source tree
+        run: |
+          set -eu
+          NAME="xenolith-engine-${{ inputs.engine_ref }}"
+          # Drop all VCS metadata — submodule contents stay as real files.
+          find src -name .git -prune -exec rm -rf {} +
+          mv src "$NAME"
+          echo "bundled modules:"; ls "$NAME" | head
+          tar -czf "$NAME.tar.gz" "$NAME"
+          ( cd "$NAME" && zip -qr "../$NAME.zip" . )
+          ls -lh "$NAME".tar.gz "$NAME".zip
+          # Checksums so the installer can verify integrity.
+          shasum -a 256 "$NAME".tar.gz "$NAME".zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish bundle to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: Engine bundle (${{ inputs.engine_ref }})
+          body: >
+            Submodule-complete source bundle of xenolith-engine
+            (ref `${{ inputs.engine_ref }}`). Use as STAPPLER_ROOT; install
+            host/target toolchains into its `toolchains/` directory.
+          files: |
+            xenolith-engine-*.tar.gz
+            xenolith-engine-*.zip
+            SHA256SUMS.txt

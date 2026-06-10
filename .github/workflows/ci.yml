@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test & lint (core + cli)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy (core + cli)
+        run: cargo clippy -p xenolith-installer-core -p xenolith-installer-cli --all-targets
+
+      - name: test (core + cli, all features)
+        run: cargo test -p xenolith-installer-core -p xenolith-installer-cli --all-features

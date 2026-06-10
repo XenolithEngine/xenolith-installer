@@ -1,0 +1,103 @@
+name: Build installers
+
+# Cross-platform desktop bundles (unsigned for now).
+#  * push a tag `vX.Y.Z`  -> builds all platforms and attaches them to a draft
+#    GitHub Release for that tag (review the draft, then publish).
+#  * run manually         -> builds all platforms, artifacts attached to the run.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: ${{ matrix.label }}
+    permissions:
+      contents: write # needed to create/update the release on a tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS (universal)
+            args: "--target universal-apple-darwin"
+          - os: ubuntu-22.04
+            label: Linux (x86_64)
+            args: ""
+          - os: windows-latest
+            label: Windows (x86_64)
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS universal targets
+        if: matrix.os == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Linux system dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            build-essential \
+            file
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: ui
+
+      - name: Build app bundles (unsigned)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: crates/gui
+          args: ${{ matrix.args }}
+          # On a tag push, publish to a draft release; otherwise just build.
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: ${{ github.ref_type == 'tag' && format('Xenolith Installer {0}', github.ref_name) || '' }}
+          releaseBody: "Unsigned desktop builds. Download the asset for your platform below."
+          releaseDraft: true
+          prerelease: false
+
+      - name: Upload bundles as run artifacts
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenolith-installer-${{ matrix.os }}
+          path: |
+            target/**/release/bundle/**/*.dmg
+            target/**/release/bundle/**/*.app
+            target/release/bundle/**/*.deb
+            target/release/bundle/**/*.rpm
+            target/release/bundle/**/*.AppImage
+            target/release/bundle/**/*.msi
+            target/release/bundle/**/*.exe
+          if-no-files-found: warn

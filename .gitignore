@@ -1,0 +1,20 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Tauri / frontend (added when the GUI lands)
+/crates/gui/target
+/ui/node_modules
+/ui/dist
+/ui/.svelte-kit
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Local install scratch / test prefixes
+/.xenolith-home
