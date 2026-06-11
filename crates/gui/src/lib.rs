@@ -847,12 +847,12 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
     make.current_dir(path)
         .arg(format!("-j{jobs}"))
         .env("STAPPLER_ROOT", projects::make_path(&engine_root))
-        .env("PATH", &path_env);
-    // Keep parallel job output (and compiler errors) from interleaving into
-    // garbled lines. Needs make >= 4.0; the macOS system make is 3.81 and would
-    // choke on `-O`, so only pass it where the toolchain ships make 4.x.
-    #[cfg(not(target_os = "macos"))]
-    make.arg("--output-sync=target");
+        .env("PATH", &path_env)
+        // Force the C locale so GNU make's gettext messages come out in ASCII
+        // English instead of the localized console codepage (e.g. CP1251 on a
+        // Russian Windows), which otherwise garbles the captured build log.
+        .env("LC_ALL", "C")
+        .env("LANG", "C");
     if target != host {
         make.arg("install").arg(format!("STAPPLER_TARGET={target}"));
     }
@@ -904,8 +904,30 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-fn stream_cmd(app: &AppHandle, cmd: &mut std::process::Command) -> Result<i32, String> {
+/// Stream a reader line by line into `emit`, reading RAW BYTES and converting
+/// lossily. We must NOT use `BufRead::lines()`: it yields an error on the first
+/// non-UTF-8 byte and the usual `map_while(Result::ok)` then DROPS the entire
+/// rest of the stream — fatal on a localized Windows where the compiler emits
+/// CP1251 (so the actual build errors, which come late, vanished from the log).
+fn pump<R: std::io::Read>(r: R, emit: &dyn Fn(String)) {
     use std::io::{BufRead, BufReader};
+    let mut reader = BufReader::new(r);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                    buf.pop();
+                }
+                emit(String::from_utf8_lossy(&buf).into_owned());
+            }
+        }
+    }
+}
+
+fn stream_cmd(app: &AppHandle, cmd: &mut std::process::Command) -> Result<i32, String> {
     log::info!("exec: {cmd:?}");
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -924,20 +946,10 @@ fn stream_cmd(app: &AppHandle, cmd: &mut std::process::Command) -> Result<i32, S
     };
     std::thread::scope(|s| {
         if let Some(out) = out {
-            s.spawn(|| {
-                BufReader::new(out)
-                    .lines()
-                    .map_while(Result::ok)
-                    .for_each(&emit)
-            });
+            s.spawn(|| pump(out, &emit));
         }
         if let Some(err) = err {
-            s.spawn(|| {
-                BufReader::new(err)
-                    .lines()
-                    .map_while(Result::ok)
-                    .for_each(&emit)
-            });
+            s.spawn(|| pump(err, &emit));
         }
     });
     let status = child.wait().map_err(|e| e.to_string())?;

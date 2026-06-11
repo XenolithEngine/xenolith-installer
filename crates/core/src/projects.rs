@@ -133,12 +133,21 @@ pub fn make_path(p: &Path) -> String {
     p.display().to_string().replace('\\', "/")
 }
 
+/// Force Unix (LF) line endings. The templates are embedded via `include_str!`,
+/// which can pick up CRLF (e.g. an autocrlf checkout on a Windows CI builder), and
+/// GNU make breaks on `\r` — a trailing carriage return gets folded into variable
+/// values and recipe lines, producing bogus paths. Write LF on every platform.
+fn lf(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
 /// Substitute the `{{…}}` placeholders shared by the project templates.
 fn render(tmpl: &str, engine_root: &Path, host_bin: &Path, host_triple: &str, exe: &str) -> String {
-    tmpl.replace("{{STAPPLER_ROOT}}", &make_path(engine_root))
+    lf(&tmpl
+        .replace("{{STAPPLER_ROOT}}", &make_path(engine_root))
         .replace("{{HOST_BIN}}", &make_path(host_bin))
         .replace("{{HOST_TRIPLE}}", host_triple)
-        .replace("{{EXE}}", exe)
+        .replace("{{EXE}}", exe))
 }
 
 /// Project-relative path of the built binary for the running OS. macOS produces
@@ -172,8 +181,8 @@ pub fn scaffold(
     }
     let src = dir.join("src");
     std::fs::create_dir_all(&src)?;
-    std::fs::write(src.join("ExampleScene.h"), SCENE_H)?;
-    std::fs::write(src.join("ExampleScene.cpp"), SCENE_CPP)?;
+    std::fs::write(src.join("ExampleScene.h"), lf(SCENE_H))?;
+    std::fs::write(src.join("ExampleScene.cpp"), lf(SCENE_CPP))?;
 
     // Carry the engine's formatting config so format-on-save matches upstream.
     let clang_format = engine_root.join(".clang-format");
@@ -275,8 +284,10 @@ mod tests {
         scaffold(&proj, "My Game", &engine, HOST, host_bin).unwrap();
 
         let mk = std::fs::read_to_string(proj.join("Makefile")).unwrap();
-        // Rendered paths are forward-slashed (make requires it; Windows-safe).
+        // Rendered paths are forward-slashed (make requires it; Windows-safe)…
         assert!(mk.contains(&format!("STAPPLER_ROOT ?= {}", make_path(&engine))));
+        // …and line endings are LF (a stray CR breaks GNU make).
+        assert!(!mk.contains('\r'));
         assert!(mk.contains("LOCAL_EXECUTABLE := My_Game"));
         assert!(mk.contains("xenolith_application"));
         assert!(mk.contains("include $(STAPPLER_ROOT)/make/universal.mk"));

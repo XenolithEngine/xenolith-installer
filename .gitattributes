@@ -1,0 +1,21 @@
+# Keep LF in the working tree on every platform. GNU make and the project
+# templates we vendor (embedded via include_str!) break on CRLF — a stray `\r`
+# folds into make variable values and produces bogus paths.
+* text=auto eol=lf
+
+# Scaffold templates are written verbatim into user projects — must stay LF.
+crates/core/templates/** text eol=lf
+
+# Binary assets must never be normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.gz binary
+*.tar binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
