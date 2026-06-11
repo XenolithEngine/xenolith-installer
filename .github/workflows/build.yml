@@ -69,8 +69,13 @@ jobs:
             build-essential \
             file
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+      # Build the frontend explicitly here. tauri-action's npm CLI runs the
+      # config's beforeBuildCommand from the wrong dir on CI, so we pre-build the
+      # SPA and disable beforeBuildCommand via tauri.ci.json below.
+      - name: Build frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
         working-directory: ui
 
       - name: Load release notes
@@ -89,7 +94,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: crates/gui
-          args: ${{ matrix.args }}
+          # `-c tauri.ci.json` merges over tauri.conf.json to disable the
+          # beforeBuildCommand (the frontend is already built in the step above).
+          args: ${{ matrix.args }} -c tauri.ci.json
           # On a tag push, publish to a draft release; otherwise just build.
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: ${{ github.ref_type == 'tag' && format('Xenolith Installer {0}', github.ref_name) || '' }}
