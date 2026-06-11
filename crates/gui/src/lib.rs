@@ -730,10 +730,20 @@ fn stream_cmd(app: &AppHandle, cmd: &mut std::process::Command) -> Result<i32, S
     };
     std::thread::scope(|s| {
         if let Some(out) = out {
-            s.spawn(|| BufReader::new(out).lines().map_while(Result::ok).for_each(&emit));
+            s.spawn(|| {
+                BufReader::new(out)
+                    .lines()
+                    .map_while(Result::ok)
+                    .for_each(&emit)
+            });
         }
         if let Some(err) = err {
-            s.spawn(|| BufReader::new(err).lines().map_while(Result::ok).for_each(&emit));
+            s.spawn(|| {
+                BufReader::new(err)
+                    .lines()
+                    .map_while(Result::ok)
+                    .for_each(&emit)
+            });
         }
     });
     let status = child.wait().map_err(|e| e.to_string())?;
