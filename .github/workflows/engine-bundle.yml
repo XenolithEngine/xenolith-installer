@@ -34,7 +34,10 @@ jobs:
           repository: XenolithEngine/xenolith-engine
           ref: ${{ inputs.engine_ref }}
           submodules: recursive
-          fetch-depth: 1
+          # Full history (NOT shallow): the build number is `git rev-list --count
+          # HEAD`, and a `fetch-depth: 1` shallow clone has only one commit, so
+          # every `.build_number` came out as `1`. depth 0 = real commit counts.
+          fetch-depth: 0
           path: src
           # If any submodule is private or on another host, replace with a PAT:
           # token: ${{ secrets.ENGINE_BUNDLE_TOKEN }}
