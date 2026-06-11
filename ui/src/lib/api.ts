@@ -176,6 +176,11 @@ export async function openInEditor(path: string, editor: string): Promise<void> 
   await invoke("open_in_editor", { path, editor });
 }
 
+export async function openWorkingDir(): Promise<void> {
+  if (!inTauri) return;
+  await invoke("open_working_dir");
+}
+
 export async function buildProject(
   path: string,
   target: string,

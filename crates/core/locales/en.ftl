@@ -20,6 +20,7 @@ action-delete = Delete
 confirm-delete = Delete { $name }? This removes its installed files.
 
 phase-downloading = Downloading
+open-working-dir = Open working directory
 phase-verifying = Verifying
 phase-extracting = Extracting
 phase-placing = Finishing

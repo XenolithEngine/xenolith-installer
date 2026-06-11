@@ -126,10 +126,13 @@ fn translate(key: String, args: Option<HashMap<String, String>>) -> String {
 
 #[tauri::command]
 async fn uninstall_component(id: String, kind: String) -> Result<(), String> {
+    log::info!("uninstall_component id={id} kind={kind}");
     let kind = parse_kind(&kind)?;
+    let id_log = id.clone();
     tauri::async_runtime::spawn_blocking(move || uninstall_blocking(&id, kind))
         .await
         .map_err(|e| e.to_string())?
+        .inspect_err(|e| log::error!("uninstall {id_log} failed: {e}"))
 }
 
 fn uninstall_blocking(id: &str, kind: Kind) -> Result<(), String> {
@@ -168,6 +171,7 @@ fn ensure_engine(app: &AppHandle, layout: &Layout, force: bool) -> Result<Engine
             }
         }
     }
+    log::info!("ensure_engine: downloading engine '{ENGINE_REF}'");
     let mut last_step = u64::MAX;
     let info = EngineBundle::new(ENGINE_REF)
         .install(layout, &mut |bytes| {
@@ -238,10 +242,13 @@ fn load_catalog_blocking() -> Result<CatalogDto, String> {
 
 #[tauri::command]
 async fn install_component(app: AppHandle, id: String, kind: String) -> Result<(), String> {
+    log::info!("install_component id={id} kind={kind}");
     let kind = parse_kind(&kind)?;
+    let id_log = id.clone();
     tauri::async_runtime::spawn_blocking(move || install_blocking(&app, &id, kind))
         .await
         .map_err(|e| e.to_string())?
+        .inspect_err(|e| log::error!("install {id_log} failed: {e}"))
 }
 
 fn install_blocking(app: &AppHandle, id: &str, kind: Kind) -> Result<(), String> {
@@ -391,6 +398,7 @@ fn create_project(
     engine: String,
     target: String,
 ) -> Result<ProjectDto, String> {
+    log::info!("create_project name={name} location={location} engine={engine} target={target}");
     let layout = layout()?;
     let engine_root = layout.engine_dir(&engine);
     if !engine_root.join("make").is_dir() {
@@ -518,6 +526,7 @@ fn available_editors() -> Vec<EditorDto> {
 
 #[tauri::command]
 fn open_in_editor(path: String, editor: String) -> Result<(), String> {
+    log::info!("open_in_editor editor={editor} path={path}");
     let spawn = |mut cmd: std::process::Command| -> Result<(), String> {
         cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
     };
@@ -529,6 +538,19 @@ fn open_in_editor(path: String, editor: String) -> Result<(), String> {
         "claude" => spawn(claude_open_cmd(&path)),
         other => Err(format!("unknown editor: {other}")),
     }
+}
+
+/// Open the SDK working directory (`~/.xenolith`) — toolchains, engines and the
+/// log file — in the OS file manager.
+#[tauri::command]
+fn open_working_dir() -> Result<(), String> {
+    let dir = log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    log::info!("open_working_dir {}", dir.display());
+    file_manager_cmd(&dir.to_string_lossy())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Reveal `path` in the OS file manager.
@@ -602,6 +624,7 @@ async fn build_project(
 /// Build a project for `target` (and optionally run it, only when `target` is the
 /// native host), streaming output as `build://line` events. Returns the exit code.
 fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Result<i32, String> {
+    log::info!("build_project path={path} target={target} run={run}");
     let layout = layout()?;
     let reg = ProjectRegistry::load(&projects_path(&layout)).map_err(|e| e.to_string())?;
     let project = reg
@@ -668,36 +691,91 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
     stream_cmd(app, &mut runner)
 }
 
+/// Remove ANSI CSI escape sequences (`ESC [ … <letter>`) from a line.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn stream_cmd(app: &AppHandle, cmd: &mut std::process::Command) -> Result<i32, String> {
     use std::io::{BufRead, BufReader};
+    log::info!("exec: {cmd:?}");
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut child = cmd.spawn().map_err(|e| {
+        log::error!("spawn failed: {e}");
+        e.to_string()
+    })?;
     let out = child.stdout.take();
     let err = child.stderr.take();
+    let emit = |line: String| {
+        // The engine colorizes its output; strip ANSI so both the UI console and
+        // the log file are plain text.
+        let line = strip_ansi(&line);
+        log::info!("> {line}");
+        let _ = app.emit("build://line", BuildLineDto { line });
+    };
     std::thread::scope(|s| {
         if let Some(out) = out {
-            s.spawn(move || {
-                for line in BufReader::new(out).lines().map_while(Result::ok) {
-                    let _ = app.emit("build://line", BuildLineDto { line });
-                }
-            });
+            s.spawn(|| BufReader::new(out).lines().map_while(Result::ok).for_each(&emit));
         }
         if let Some(err) = err {
-            s.spawn(move || {
-                for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    let _ = app.emit("build://line", BuildLineDto { line });
-                }
-            });
+            s.spawn(|| BufReader::new(err).lines().map_while(Result::ok).for_each(&emit));
         }
     });
     let status = child.wait().map_err(|e| e.to_string())?;
-    Ok(status.code().unwrap_or(-1))
+    let code = status.code().unwrap_or(-1);
+    log::info!("exit: {code}");
+    Ok(code)
+}
+
+/// Where the rolling log file lives: the SDK root (`~/.xenolith/installer.log`),
+/// so testers can just send it. Falls back to the temp dir.
+fn log_dir() -> std::path::PathBuf {
+    layout()
+        .ok()
+        .and_then(|l| l.config.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                        path: log_dir(),
+                        file_name: Some("installer".into()),
+                    }),
+                ])
+                .build(),
+        )
+        .setup(|_app| {
+            log::info!(
+                "Xenolith Installer {} starting ({} {}), data: {}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                log_dir().display()
+            );
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             detect_host,
@@ -714,7 +792,8 @@ pub fn run() {
             remove_project,
             build_project,
             available_editors,
-            open_in_editor
+            open_in_editor,
+            open_working_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Xenolith installer");

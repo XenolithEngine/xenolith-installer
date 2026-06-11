@@ -20,6 +20,7 @@ action-delete = Удалить
 confirm-delete = Удалить { $name }? Установленные файлы будут удалены.
 
 phase-downloading = Загрузка
+open-working-dir = Открыть рабочий каталог
 phase-verifying = Проверка
 phase-extracting = Распаковка
 phase-placing = Завершение
