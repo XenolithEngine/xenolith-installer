@@ -528,6 +528,7 @@ fn available_editors() -> Vec<EditorDto> {
 fn open_in_editor(path: String, editor: String) -> Result<(), String> {
     log::info!("open_in_editor editor={editor} path={path}");
     let spawn = |mut cmd: std::process::Command| -> Result<(), String> {
+        clean_external_env(&mut cmd);
         cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
     };
     match editor.as_str() {
@@ -547,11 +548,74 @@ fn open_working_dir() -> Result<(), String> {
     let dir = log_dir();
     let _ = std::fs::create_dir_all(&dir);
     log::info!("open_working_dir {}", dir.display());
-    file_manager_cmd(&dir.to_string_lossy())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let mut cmd = file_manager_cmd(&dir.to_string_lossy());
+    clean_external_env(&mut cmd);
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
+
+/// AppImage's runtime prepends its bundled libraries/modules to a set of
+/// environment variables. Any process we spawn (xdg-open, the file manager,
+/// editors) then loads those bundled libs and dies with `undefined symbol`
+/// (e.g. the AppImage's libcurl vs the system's nghttp2). Strip the AppDir
+/// entries so spawned tools use the system libraries. No-op outside an AppImage.
+#[cfg(target_os = "linux")]
+fn clean_external_env(cmd: &mut std::process::Command) {
+    let Some(appdir) = std::env::var_os("APPDIR") else {
+        return;
+    };
+    let appdir = std::path::PathBuf::from(appdir);
+    // Colon-separated path lists: keep only entries outside the AppDir.
+    for var in [
+        "LD_LIBRARY_PATH",
+        "PATH",
+        "GTK_PATH",
+        "GST_PLUGIN_SYSTEM_PATH",
+        "GST_PLUGIN_SYSTEM_PATH_1_0",
+        "GIO_MODULE_DIR",
+        "GIO_EXTRA_MODULES",
+        "QT_PLUGIN_PATH",
+        "GDK_PIXBUF_MODULEDIR",
+        "GSETTINGS_SCHEMA_DIR",
+        "PYTHONPATH",
+        "PERLLIB",
+        "XDG_DATA_DIRS",
+        "XDG_CONFIG_DIRS",
+    ] {
+        let Some(val) = std::env::var_os(var) else {
+            continue;
+        };
+        let kept: Vec<_> = std::env::split_paths(&val)
+            .filter(|p| !p.starts_with(&appdir))
+            .collect();
+        match std::env::join_paths(&kept) {
+            Ok(joined) if !kept.is_empty() => {
+                cmd.env(var, joined);
+            }
+            _ => {
+                cmd.env_remove(var);
+            }
+        }
+    }
+    // Single values pointing into the AppDir.
+    for var in [
+        "LD_PRELOAD",
+        "GDK_PIXBUF_MODULE_FILE",
+        "FONTCONFIG_FILE",
+        "FONTCONFIG_PATH",
+        "GTK_EXE_PREFIX",
+        "PYTHONHOME",
+    ] {
+        let inside = std::env::var_os(var)
+            .map(|v| std::path::Path::new(&v).starts_with(&appdir))
+            .unwrap_or(false);
+        if inside {
+            cmd.env_remove(var);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn clean_external_env(_cmd: &mut std::process::Command) {}
 
 /// Reveal `path` in the OS file manager.
 fn file_manager_cmd(path: &str) -> std::process::Command {

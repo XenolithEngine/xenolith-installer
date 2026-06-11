@@ -16,6 +16,17 @@
   --xeno-radius-card: 10px;
   --xeno-radius-control: 6px;
   --xeno-font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Render native controls (the <select> popup, scrollbars, inputs) in dark mode
+     so WebKitGTK on Linux doesn't draw white-on-white menus. */
+  color-scheme: dark;
+}
+
+/* Belt-and-suspenders for the native <select> dropdown — its popup items are
+   drawn by the platform, so set explicit colours on the options too. */
+select,
+option {
+  color: var(--xeno-text);
+  background-color: var(--xeno-bg);
 }
 
 /* Reset the root so host typography never leaks in (font, alignment, case,
