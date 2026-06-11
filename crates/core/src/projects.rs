@@ -125,10 +125,18 @@ const SETTINGS_TMPL: &str = include_str!("../templates/settings.json");
 const SCENE_H: &str = include_str!("../templates/src/ExampleScene.h");
 const SCENE_CPP: &str = include_str!("../templates/src/ExampleScene.cpp");
 
+/// A path in forward-slash form. GNU make REQUIRES `/` (a backslash is an escape /
+/// line-continuation, so a Windows `C:\…` `STAPPLER_ROOT` breaks the build), and
+/// JSON needs it too (`\` is an invalid escape). Forward slashes work on every OS,
+/// including Windows. No-op where the path already has none.
+pub fn make_path(p: &Path) -> String {
+    p.display().to_string().replace('\\', "/")
+}
+
 /// Substitute the `{{…}}` placeholders shared by the project templates.
 fn render(tmpl: &str, engine_root: &Path, host_bin: &Path, host_triple: &str, exe: &str) -> String {
-    tmpl.replace("{{STAPPLER_ROOT}}", &engine_root.display().to_string())
-        .replace("{{HOST_BIN}}", &host_bin.display().to_string())
+    tmpl.replace("{{STAPPLER_ROOT}}", &make_path(engine_root))
+        .replace("{{HOST_BIN}}", &make_path(host_bin))
         .replace("{{HOST_TRIPLE}}", host_triple)
         .replace("{{EXE}}", exe)
 }
@@ -267,7 +275,8 @@ mod tests {
         scaffold(&proj, "My Game", &engine, HOST, host_bin).unwrap();
 
         let mk = std::fs::read_to_string(proj.join("Makefile")).unwrap();
-        assert!(mk.contains(&format!("STAPPLER_ROOT ?= {}", engine.display())));
+        // Rendered paths are forward-slashed (make requires it; Windows-safe).
+        assert!(mk.contains(&format!("STAPPLER_ROOT ?= {}", make_path(&engine))));
         assert!(mk.contains("LOCAL_EXECUTABLE := My_Game"));
         assert!(mk.contains("xenolith_application"));
         assert!(mk.contains("include $(STAPPLER_ROOT)/make/universal.mk"));
@@ -280,8 +289,8 @@ mod tests {
 
         // .vscode wired to the host toolchain, with placeholders substituted
         let settings = std::fs::read_to_string(proj.join(".vscode/settings.json")).unwrap();
-        assert!(settings.contains(&format!("{}/clang-21", host_bin.display())));
-        assert!(settings.contains(&format!("{}/lldb-dap", host_bin.display())));
+        assert!(settings.contains(&format!("{}/clang-21", make_path(host_bin))));
+        assert!(settings.contains(&format!("{}/lldb-dap", make_path(host_bin))));
         // binaryPath is OS-specific; the common prefix is present on every OS.
         assert!(settings.contains(&format!("stappler-build/{HOST}/debug/cc/My_Game")));
         assert!(!settings.contains("{{"));

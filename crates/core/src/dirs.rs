@@ -38,17 +38,27 @@ impl Layout {
         }
     }
 
-    /// Single-root layout under `~/.local/share/xenolith` on every platform. We
-    /// use the XDG data path verbatim (NOT the platform convention dir) on all
-    /// OSes: macOS `~/Library/Application Support/…` contains a SPACE, and GNU
-    /// make cannot handle a space in `STAPPLER_ROOT` / `include` paths — a project
-    /// build aborts with "No such file or directory". `~/.local/share/xenolith`
-    /// has no space, so it works for make on macOS too.
+    /// Single-root data layout, in the OS-native no-space location:
+    ///   * Windows → `%LOCALAPPDATA%\xenolith` (`C:\Users\<u>\AppData\Local\xenolith`)
+    ///   * macOS / Linux → `~/.local/share/xenolith`
+    ///
+    /// We deliberately avoid macOS's convention dir `~/Library/Application Support/…`
+    /// because it contains a SPACE, and GNU make cannot handle a space in
+    /// `STAPPLER_ROOT` / `include` paths (a project build aborts with "No such file
+    /// or directory"). All the paths above are space-free, so make is happy.
     pub fn system() -> Result<Self, DirsError> {
         let base = directories::BaseDirs::new().ok_or(DirsError::NoPlatformDirs)?;
-        Ok(Self::from_home(
-            &base.home_dir().join(".local/share/xenolith"),
-        ))
+        // `data_local_dir()` is `%LOCALAPPDATA%` on Windows but `~/Library/…` (with a
+        // space) on macOS, so only use it on Windows; elsewhere build the XDG path.
+        #[cfg(target_os = "windows")]
+        let root = base.data_local_dir().join("xenolith");
+        #[cfg(not(target_os = "windows"))]
+        let root = base
+            .home_dir()
+            .join(".local")
+            .join("share")
+            .join("xenolith");
+        Ok(Self::from_home(&root))
     }
 
     /// Resolve using the documented precedence. `prefix` is the explicit

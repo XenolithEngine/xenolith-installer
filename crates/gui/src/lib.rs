@@ -836,16 +836,23 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
     // engine generate Contents/Info.plist, so it runs in place. Cross build: pass
     // STAPPLER_TARGET (can't run the result here anyway). Build number comes from
     // the `.build_number` files baked into the bundle.
-    // Build in parallel — one job per logical CPU (the engine's makefiles are
-    // -j safe). Without this make runs single-threaded (107 steps serially).
+    // Build in parallel — one job per logical CPU. Without this make runs
+    // single-threaded (every step serially).
     let jobs = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    // STAPPLER_ROOT must use forward slashes: this env value overrides the
+    // Makefile's default, and GNU make breaks on Windows backslash paths.
     let mut make = std::process::Command::new("make");
     make.current_dir(path)
         .arg(format!("-j{jobs}"))
-        .env("STAPPLER_ROOT", &engine_root)
+        .env("STAPPLER_ROOT", projects::make_path(&engine_root))
         .env("PATH", &path_env);
+    // Keep parallel job output (and compiler errors) from interleaving into
+    // garbled lines. Needs make >= 4.0; the macOS system make is 3.81 and would
+    // choke on `-O`, so only pass it where the toolchain ships make 4.x.
+    #[cfg(not(target_os = "macos"))]
+    make.arg("--output-sync=target");
     if target != host {
         make.arg("install").arg(format!("STAPPLER_TARGET={target}"));
     }
