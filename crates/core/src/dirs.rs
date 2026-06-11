@@ -38,13 +38,17 @@ impl Layout {
         }
     }
 
-    /// Single-root layout under `~/.xenolith`. We deliberately avoid the platform
-    /// convention dir (macOS `~/Library/Application Support/…`) because it contains
-    /// a SPACE, and GNU make cannot handle a space in `STAPPLER_ROOT` / `include`
-    /// paths — a project build aborts with "No such file or directory".
+    /// Single-root layout under `~/.local/share/xenolith` on every platform. We
+    /// use the XDG data path verbatim (NOT the platform convention dir) on all
+    /// OSes: macOS `~/Library/Application Support/…` contains a SPACE, and GNU
+    /// make cannot handle a space in `STAPPLER_ROOT` / `include` paths — a project
+    /// build aborts with "No such file or directory". `~/.local/share/xenolith`
+    /// has no space, so it works for make on macOS too.
     pub fn system() -> Result<Self, DirsError> {
         let base = directories::BaseDirs::new().ok_or(DirsError::NoPlatformDirs)?;
-        Ok(Self::from_home(&base.home_dir().join(".xenolith")))
+        Ok(Self::from_home(
+            &base.home_dir().join(".local/share/xenolith"),
+        ))
     }
 
     /// Resolve using the documented precedence. `prefix` is the explicit

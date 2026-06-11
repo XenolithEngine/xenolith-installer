@@ -38,6 +38,17 @@ const LIST_ATTEMPTS: u32 = 4;
 /// Engine bundle ref to install as STAPPLER_ROOT (temporary GH-release source).
 const ENGINE_REF: &str = "master";
 
+/// Serializes the shared-state sections of concurrent installs/uninstalls: the
+/// engine download (so it happens once) and the `installed.json` read-modify-write
+/// plus engine relink (so parallel installs don't clobber each other's records).
+/// Downloads and extraction stay parallel — they touch only their own dir.
+static INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Lock `INSTALL_LOCK`, recovering the guard if a previous holder panicked.
+fn install_guard() -> std::sync::MutexGuard<'static, ()> {
+    INSTALL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// `<config>/engine.json` — records the installed engine/runtime version.
 fn engine_info_path(layout: &Layout) -> std::path::PathBuf {
     layout.config.join("engine.json")
@@ -139,6 +150,7 @@ fn uninstall_blocking(id: &str, kind: Kind) -> Result<(), String> {
     let layout = layout()?;
     install::uninstall(&layout, kind, id).map_err(|e| e.to_string())?;
     let path = layout.installed_manifest();
+    let _g = install_guard();
     let mut state = InstalledState::load(&path).map_err(|e| e.to_string())?;
     state.remove(id, kind);
     state.save(&path).map_err(|e| e.to_string())?;
@@ -254,8 +266,12 @@ async fn install_component(app: AppHandle, id: String, kind: String) -> Result<(
 fn install_blocking(app: &AppHandle, id: &str, kind: Kind) -> Result<(), String> {
     let layout = layout()?;
     // Toolchains install into <engine>/toolchains, so the engine (STAPPLER_ROOT)
-    // must exist first. Downloads it on first use; no-op afterwards.
-    ensure_engine(app, &layout, false)?;
+    // must exist first. Downloads it on first use; no-op afterwards. Hold the lock
+    // so concurrent installs don't both download the engine.
+    {
+        let _g = install_guard();
+        ensure_engine(app, &layout, false)?;
+    }
     let transport = FtpTransport::new(SERVER);
 
     // Establish the trusted signing key (fetched from a keyserver, pinned).
@@ -309,7 +325,11 @@ fn install_blocking(app: &AppHandle, id: &str, kind: Kind) -> Result<(), String>
         })
         .map_err(|e| e.to_string())?;
 
+    // Serialize the read-modify-write of installed.json + the engine relink so
+    // parallel installs (e.g. host + target of the same triple) don't clobber
+    // each other's records.
     let path = layout.installed_manifest();
+    let _g = install_guard();
     let mut state = InstalledState::load(&path).map_err(|e| e.to_string())?;
     state.upsert(record);
     state.save(&path).map_err(|e| e.to_string())?;
@@ -460,8 +480,21 @@ struct EditorDto {
     name: &'static str,
 }
 
-/// Whether `cmd` resolves on the user's login PATH (a GUI app's own PATH is
-/// minimal on macOS, so go through a login shell).
+/// Whether `cmd` resolves on the user's PATH. On Windows we scan PATH/PATHEXT in
+/// pure Rust (no subprocess → no console-window flash); elsewhere a GUI app's own
+/// PATH is minimal (macOS especially), so resolve through a login shell.
+#[cfg(target_os = "windows")]
+fn has_command(cmd: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into());
+    std::env::split_paths(&path).any(|dir| {
+        exts.split(';')
+            .any(|ext| dir.join(format!("{cmd}{ext}")).is_file())
+    })
+}
+#[cfg(not(target_os = "windows"))]
 fn has_command(cmd: &str) -> bool {
     std::process::Command::new("zsh")
         .args(["-lc", &format!("command -v {cmd} >/dev/null 2>&1")])
@@ -479,6 +512,58 @@ fn app_installed(app: &str) -> bool {
 #[cfg(not(target_os = "macos"))]
 fn app_installed(_: &str) -> bool {
     false
+}
+
+/// The install path of a GUI editor on Windows (user- and machine-wide installs),
+/// since VS Code / Cursor are often not on PATH unless the user opted in.
+#[cfg(target_os = "windows")]
+fn win_editor_exe(id: &str) -> Option<std::path::PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+    let pf = std::env::var_os("ProgramFiles").map(std::path::PathBuf::from);
+    let candidates: Vec<std::path::PathBuf> = match id {
+        "vscode" => [
+            local.as_ref().map(|l| {
+                l.join("Programs")
+                    .join("Microsoft VS Code")
+                    .join("Code.exe")
+            }),
+            pf.as_ref()
+                .map(|p| p.join("Microsoft VS Code").join("Code.exe")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        "cursor" => [local
+            .as_ref()
+            .map(|l| l.join("Programs").join("cursor").join("Cursor.exe"))]
+        .into_iter()
+        .flatten()
+        .collect(),
+        _ => vec![],
+    };
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Native (beyond bare PATH) presence check for a GUI editor by id.
+fn editor_present_natively(id: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let app = match id {
+            "vscode" => "Visual Studio Code",
+            "cursor" => "Cursor",
+            _ => return false,
+        };
+        app_installed(app)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        win_editor_exe(id).is_some()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = id;
+        false
+    }
 }
 
 fn file_manager_name() -> &'static str {
@@ -503,13 +588,13 @@ fn available_editors() -> Vec<EditorDto> {
         id: "files",
         name: file_manager_name(),
     }];
-    if app_installed("Visual Studio Code") || has_command("code") {
+    if editor_present_natively("vscode") || has_command("code") {
         out.push(EditorDto {
             id: "vscode",
             name: "VS Code",
         });
     }
-    if app_installed("Cursor") || has_command("cursor") {
+    if editor_present_natively("cursor") || has_command("cursor") {
         out.push(EditorDto {
             id: "cursor",
             name: "Cursor",
@@ -541,8 +626,8 @@ fn open_in_editor(path: String, editor: String) -> Result<(), String> {
     }
 }
 
-/// Open the SDK working directory (`~/.xenolith`) — toolchains, engines and the
-/// log file — in the OS file manager.
+/// Open the SDK working directory (`~/.local/share/xenolith`) — toolchains,
+/// engines and the log file — in the OS file manager.
 #[tauri::command]
 fn open_working_dir() -> Result<(), String> {
     let dir = log_dir();
@@ -639,19 +724,42 @@ fn file_manager_cmd(path: &str) -> std::process::Command {
     }
 }
 
-/// Open a GUI editor at `path`: macOS prefers LaunchServices (`open -a`, no PATH
-/// issues); elsewhere the CLI via a login shell.
+/// Open a GUI editor at `path`. macOS prefers LaunchServices (`open -a`, no PATH
+/// issues); Windows launches the resolved `.exe` (no console flash) and falls back
+/// to the CLI shim; elsewhere the CLI via a login shell.
 fn editor_open_cmd(cli: &str, app: &str, path: &str) -> std::process::Command {
     #[cfg(target_os = "macos")]
-    if app_installed(app) {
-        let mut c = std::process::Command::new("open");
-        c.args(["-a", app, path]);
-        return c;
+    {
+        if app_installed(app) {
+            let mut c = std::process::Command::new("open");
+            c.args(["-a", app, path]);
+            return c;
+        }
+        let mut c = std::process::Command::new("zsh");
+        c.args(["-lc", &format!("{cli} \"$1\""), "_", path]);
+        c
     }
-    let _ = app;
-    let mut c = std::process::Command::new("zsh");
-    c.args(["-lc", &format!("{cli} \"$1\"",), "_", path]);
-    c
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        let id = if cli == "code" { "vscode" } else { "cursor" };
+        if let Some(exe) = win_editor_exe(id) {
+            let mut c = std::process::Command::new(exe);
+            c.arg(path);
+            return c;
+        }
+        // `code`/`cursor` on PATH are .cmd shims — launch them via cmd.
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", cli, path]);
+        c
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = app;
+        let mut c = std::process::Command::new("zsh");
+        c.args(["-lc", &format!("{cli} \"$1\""), "_", path]);
+        c
+    }
 }
 
 fn claude_open_cmd(path: &str) -> std::process::Command {
@@ -665,7 +773,16 @@ fn claude_open_cmd(path: &str) -> std::process::Command {
         c.args(["-e", &script]);
         c
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // Open a fresh console in the project dir running the claude CLI.
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", "/D"])
+            .arg(path)
+            .args(["cmd", "/K", "claude"]);
+        c
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let mut c = std::process::Command::new("claude");
         c.current_dir(path);
@@ -719,8 +836,14 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
     // engine generate Contents/Info.plist, so it runs in place. Cross build: pass
     // STAPPLER_TARGET (can't run the result here anyway). Build number comes from
     // the `.build_number` files baked into the bundle.
+    // Build in parallel — one job per logical CPU (the engine's makefiles are
+    // -j safe). Without this make runs single-threaded (107 steps serially).
+    let jobs = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let mut make = std::process::Command::new("make");
     make.current_dir(path)
+        .arg(format!("-j{jobs}"))
         .env("STAPPLER_ROOT", &engine_root)
         .env("PATH", &path_env);
     if target != host {
@@ -816,7 +939,7 @@ fn stream_cmd(app: &AppHandle, cmd: &mut std::process::Command) -> Result<i32, S
     Ok(code)
 }
 
-/// Where the rolling log file lives: the SDK root (`~/.xenolith/installer.log`),
+/// Where the rolling log file lives: the SDK root (`~/.local/share/xenolith/installer.log`),
 /// so testers can just send it. Falls back to the temp dir.
 fn log_dir() -> std::path::PathBuf {
     layout()

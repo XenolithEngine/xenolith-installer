@@ -3,9 +3,13 @@ LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 
 LOCAL_EXECUTABLE := {{EXE}}
 
+# Paths are RELATIVE to the engine root: the build prepends $(GLOBAL_ROOT)/ to
+# every non-absolute entry. Do NOT use $(STAPPLER_ROOT)/… here — on Windows an
+# absolute `C:/…` path fails the engine's Unix-only `$(filter /%,…)` abs-path
+# test, gets treated as relative, double-prefixed, and the modules go unfound.
 LOCAL_MODULES_PATHS = \
-	$(STAPPLER_ROOT)/stappler/stappler-modules.mk \
-	$(STAPPLER_ROOT)/xenolith/xenolith-modules.mk
+	stappler/stappler-modules.mk \
+	xenolith/xenolith-modules.mk
 
 LOCAL_MODULES := \
 	runtime \
