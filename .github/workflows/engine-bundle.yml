@@ -46,9 +46,13 @@ jobs:
           # caching it in a `.build_number` file; with .git stripped it reads that
           # file. Write it now, while .git is still present, for each module dir
           # the build queries (root + the stappler/xenolith/runtime modules).
+          # Use printf (NOT echo): the engine's no-git read path returns the file
+          # contents RAW (no $(firstword) strip, unlike the git path), so a trailing
+          # newline would ride into the build and split the compile command on
+          # Windows/PowerShell. Write the bare number, no trailing newline.
           for d in . stappler xenolith runtime; do
             n=$(git -C "src/$d" rev-list --count HEAD 2>/dev/null || true)
-            if [ -n "$n" ]; then echo "$n" > "src/$d/.build_number"; echo "src/$d -> $n"; fi
+            if [ -n "$n" ]; then printf '%s' "$n" > "src/$d/.build_number"; echo "src/$d -> $n"; fi
           done
 
       - name: Vendor submodules into a clean source tree

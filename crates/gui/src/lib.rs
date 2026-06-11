@@ -815,6 +815,18 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
         .ok_or_else(|| "project not found".to_string())?
         .clone();
 
+    // Belt-and-suspenders for line endings: a project scaffolded by an older
+    // build (or edited on Windows) can have a CRLF Makefile, and a stray `\r`
+    // folds into make variables and SPLITS the compile command so it won't run.
+    // Strip CR from the Makefile before every build so old projects self-heal.
+    let makefile = std::path::Path::new(path).join("Makefile");
+    if let Ok(content) = std::fs::read_to_string(&makefile) {
+        if content.contains('\r') {
+            log::info!("normalizing CRLF -> LF in {}", makefile.display());
+            let _ = std::fs::write(&makefile, content.replace('\r', ""));
+        }
+    }
+
     let engine_root = layout.engine_dir(&project.engine);
     let host = native_host()?;
     let host_bin = install::component_dir(&layout, Kind::Host, &host).join("bin");
