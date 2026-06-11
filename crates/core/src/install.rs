@@ -17,24 +17,121 @@ use crate::state::InstalledComponent;
 use crate::transport::{fetch_with_retries, Transport, TransportError};
 use crate::verify::{Verifier, VerifyError};
 
-/// On-disk location of an installed component: `<sdk>/<release>/<kind>/<id>`.
-pub fn component_dir(layout: &Layout, release: &str, kind: Kind, id: &str) -> PathBuf {
-    layout.sdk_root().join(release).join(kind.dir()).join(id)
+/// On-disk location of an installed toolchain in the shared, engine-independent
+/// store: `<data>/toolchains/<hosts|targets>/<triple>`. Engines symlink to these.
+pub fn component_dir(layout: &Layout, kind: Kind, id: &str) -> PathBuf {
+    layout.toolchains_store_dir().join(kind.dir()).join(id)
+}
+
+/// Create a directory link `dst` -> `src`: a symlink on Unix; on Windows a
+/// symlink if allowed, otherwise a copy (junctions would avoid the copy but need
+/// an extra crate — a TODO).
+fn link_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(src, dst).or_else(|_| copy_dir_all(src, dst))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        copy_dir_all(src, dst)
+    }
+}
+
+#[cfg(any(windows, not(any(unix, windows))))]
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)?.flatten() {
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove whatever is at `path` (a symlink or a real dir) so it can be relinked.
+fn clear_link(path: &std::path::Path) -> std::io::Result<()> {
+    if path.is_symlink() {
+        std::fs::remove_file(path).or_else(|_| std::fs::remove_dir_all(path))
+    } else if path.exists() {
+        std::fs::remove_dir_all(path)
+    } else {
+        Ok(())
+    }
+}
+
+/// Symlink every toolchain from the shared store into one engine's `toolchains/`
+/// dir (refreshing existing links), so that engine's build can find them.
+pub fn link_toolchains_into_engine(layout: &Layout, engine_reference: &str) -> std::io::Result<()> {
+    let engine_tc = layout.engine_dir(engine_reference).join("toolchains");
+    for kind in [Kind::Host, Kind::Target] {
+        let store_kind = layout.toolchains_store_dir().join(kind.dir());
+        if !store_kind.is_dir() {
+            continue;
+        }
+        let link_kind = engine_tc.join(kind.dir());
+        std::fs::create_dir_all(&link_kind)?;
+        for entry in std::fs::read_dir(&store_kind)?.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let link = link_kind.join(entry.file_name());
+            clear_link(&link)?;
+            link_dir(&entry.path(), &link)?;
+        }
+    }
+    Ok(())
+}
+
+/// Refresh toolchain links in every installed engine — call after a toolchain is
+/// added or removed so all engine versions see the change.
+pub fn relink_all_engines(layout: &Layout) -> std::io::Result<()> {
+    let engines = layout.engines_dir();
+    if !engines.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&engines)?.flatten() {
+        if entry.path().is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                link_toolchains_into_engine(layout, name)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Remove an installed component's files. Idempotent — a missing directory is
 /// not an error (the caller still drops the registry entry).
-pub fn uninstall(
-    layout: &Layout,
-    release: &str,
-    kind: Kind,
-    id: &str,
-) -> Result<(), std::io::Error> {
-    let dir = component_dir(layout, release, kind, id);
+pub fn uninstall(layout: &Layout, kind: Kind, id: &str) -> Result<(), std::io::Error> {
+    let dir = component_dir(layout, kind, id);
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }
     Ok(())
+}
+
+/// The SDK archives wrap everything in a single top-level `<triple>/` dir; if
+/// `dir`'s only entry is exactly that wrapper (its name matches one of `names` —
+/// the component id or triple), return it so we can promote its contents and
+/// avoid a doubly-nested `toolchains/<kind>/<triple>/<triple>`. A lone dir with
+/// any other name (e.g. an archive whose sole top entry is `bin/`) is NOT a
+/// wrapper and is left in place.
+fn wrapper_dir(dir: &std::path::Path, names: &[&str]) -> Option<PathBuf> {
+    let mut entries = std::fs::read_dir(dir).ok()?.flatten();
+    let first = entries.next()?.path();
+    if entries.next().is_none() && first.is_dir() {
+        let name = first.file_name()?.to_str()?;
+        if names.contains(&name) {
+            return Some(first);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,13 +181,9 @@ impl<'a> Installer<'a> {
         format!("{}/{}/{}", self.remote_base, c.kind.dir(), c.sig)
     }
 
-    /// Final on-disk location: `<sdk>/<release>/<kind>/<id>`.
+    /// Final on-disk location in the shared store: `<data>/toolchains/<kind>/<triple>`.
     pub fn install_dir(&self, c: &Component) -> PathBuf {
-        self.layout
-            .sdk_root()
-            .join(&self.release)
-            .join(c.kind.dir())
-            .join(&c.id)
+        component_dir(self.layout, c.kind, &c.id)
     }
 
     /// Run the full pipeline for `component_id`. `now_rfc3339` is supplied by the
@@ -157,13 +250,21 @@ impl<'a> Installer<'a> {
             std::fs::remove_dir_all(&staging)?;
         }
         extract::extract_tar_xz_bytes(&archive, &staging)?;
+        // Promote the archive's single top-level `<triple>/` wrapper so the
+        // install is `toolchains/<kind>/<triple>`, not `…/<triple>/<triple>`.
+        let placed = wrapper_dir(&staging, &[&component.id, &component.triple])
+            .unwrap_or_else(|| staging.clone());
 
-        // 4. Swap staging into place atomically (replacing any previous install).
+        // 4. Swap into place atomically (replacing any previous install).
         progress(Phase::Placing, 0);
         if final_dir.exists() {
             std::fs::remove_dir_all(&final_dir)?;
         }
-        std::fs::rename(&staging, &final_dir)?;
+        std::fs::rename(&placed, &final_dir)?;
+        // Drop the (now-empty) staging wrapper if it wasn't what we moved.
+        if placed != staging && staging.exists() {
+            let _ = std::fs::remove_dir_all(&staging);
+        }
 
         Ok(InstalledComponent::from_component(
             component,
@@ -244,10 +345,10 @@ mod tests {
             )
             .unwrap();
 
-        // Files landed in <sdk>/<release>/hosts/<id>, no staging left behind.
+        // Files landed in <engine>/toolchains/hosts/<triple>, no staging left.
         let expected = layout
-            .sdk_root()
-            .join("sdk-v0alpha0/hosts/x86_64-unknown-linux-gnu");
+            .toolchains_store_dir()
+            .join("hosts/x86_64-unknown-linux-gnu");
         assert_eq!(rec.path, expected);
         assert_eq!(
             std::fs::read(expected.join("include/xenolith.h")).unwrap(),
@@ -339,18 +440,94 @@ mod tests {
     }
 
     #[test]
+    fn toolchains_are_linked_into_the_engine_not_copied() {
+        let home = tempfile::tempdir().unwrap();
+        let layout = Layout::from_home(home.path());
+        // A toolchain in the shared store…
+        let store_tc = component_dir(&layout, Kind::Host, "x86_64-unknown-linux-gnu");
+        std::fs::create_dir_all(&store_tc).unwrap();
+        std::fs::write(store_tc.join("host.mk"), b"HOST_CC := cc").unwrap();
+        // …and an installed engine.
+        std::fs::create_dir_all(layout.engine_dir("master").join("make")).unwrap();
+
+        link_toolchains_into_engine(&layout, "master").unwrap();
+
+        let linked = layout
+            .engine_dir("master")
+            .join("toolchains/hosts/x86_64-unknown-linux-gnu");
+        // The toolchain is reachable through the engine…
+        assert_eq!(
+            std::fs::read(linked.join("host.mk")).unwrap(),
+            b"HOST_CC := cc"
+        );
+        // …via a link, not a copy — so an engine update never duplicates it.
+        #[cfg(unix)]
+        assert!(linked.is_symlink());
+        // Re-linking is idempotent.
+        link_toolchains_into_engine(&layout, "master").unwrap();
+        assert!(linked.join("host.mk").exists());
+    }
+
+    #[test]
     fn uninstall_removes_the_dir_and_is_idempotent() {
         let home = tempfile::tempdir().unwrap();
         let layout = Layout::from_home(home.path());
-        let dir = component_dir(&layout, "rel", Kind::Target, "x86_64-unknown-linux-gnu");
+        let dir = component_dir(&layout, Kind::Target, "x86_64-unknown-linux-gnu");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f"), b"x").unwrap();
         assert!(dir.exists());
 
-        uninstall(&layout, "rel", Kind::Target, "x86_64-unknown-linux-gnu").unwrap();
+        uninstall(&layout, Kind::Target, "x86_64-unknown-linux-gnu").unwrap();
         assert!(!dir.exists());
         // Removing again must not error.
-        uninstall(&layout, "rel", Kind::Target, "x86_64-unknown-linux-gnu").unwrap();
+        uninstall(&layout, Kind::Target, "x86_64-unknown-linux-gnu").unwrap();
+    }
+
+    #[test]
+    fn archive_top_level_triple_dir_is_promoted_not_double_nested() {
+        // Real SDK archives wrap files in a single `<triple>/` dir; the install
+        // must be toolchains/<kind>/<triple>/bin, not …/<triple>/<triple>/bin.
+        let archive = make_tar_xz(&[
+            ("aarch64-apple-macosx/bin/cc", b"ELF", true),
+            ("aarch64-apple-macosx/host.mk", b"HOST_CC := ...", false),
+        ]);
+        let sig = b"sig".to_vec();
+        let hosts = format!(
+            "-rw-r--r-- 1 0 0 {} Jun 08 19:39 aarch64-apple-macosx.tar.xz\n\
+             -rw-r--r-- 1 0 0 {} Jun 08 19:40 aarch64-apple-macosx.tar.xz.sig",
+            archive.len(),
+            sig.len()
+        );
+        let (manifest, _) = Manifest::from_dir_listings("sdk-v0alpha0", &hosts, "");
+        let transport = MockTransport::new()
+            .with_file(
+                "releases/sdk-v0alpha0/hosts/aarch64-apple-macosx.tar.xz",
+                &archive,
+            )
+            .with_file(
+                "releases/sdk-v0alpha0/hosts/aarch64-apple-macosx.tar.xz.sig",
+                &sig,
+            );
+        let home = tempfile::tempdir().unwrap();
+        let layout = Layout::from_home(home.path());
+        let installer = Installer {
+            transport: &transport,
+            verifier: &AcceptAll,
+            layout: &layout,
+            remote_base: REMOTE_BASE.into(),
+            release: "sdk-v0alpha0".into(),
+        };
+        let rec = installer
+            .install(&manifest, "aarch64-apple-macosx", "t", &mut |_, _| {})
+            .unwrap();
+        let dir = layout
+            .toolchains_store_dir()
+            .join("hosts/aarch64-apple-macosx");
+        assert_eq!(rec.path, dir);
+        // host.mk sits directly in the toolchain dir — no extra nesting.
+        assert!(dir.join("host.mk").exists());
+        assert!(dir.join("bin/cc").exists());
+        assert!(!dir.join("aarch64-apple-macosx").exists());
     }
 
     #[test]

@@ -38,15 +38,13 @@ impl Layout {
         }
     }
 
-    /// Platform-conventional layout via the `directories` crate.
+    /// Single-root layout under `~/.xenolith`. We deliberately avoid the platform
+    /// convention dir (macOS `~/Library/Application Support/…`) because it contains
+    /// a SPACE, and GNU make cannot handle a space in `STAPPLER_ROOT` / `include`
+    /// paths — a project build aborts with "No such file or directory".
     pub fn system() -> Result<Self, DirsError> {
-        let pd = directories::ProjectDirs::from("studio", "Xenolith", "Installer")
-            .ok_or(DirsError::NoPlatformDirs)?;
-        Ok(Layout {
-            config: pd.config_dir().to_path_buf(),
-            data: pd.data_dir().to_path_buf(),
-            cache: pd.cache_dir().to_path_buf(),
-        })
+        let base = directories::BaseDirs::new().ok_or(DirsError::NoPlatformDirs)?;
+        Ok(Self::from_home(&base.home_dir().join(".xenolith")))
     }
 
     /// Resolve using the documented precedence. `prefix` is the explicit
@@ -71,9 +69,24 @@ impl Layout {
         self.config.join("installed.json")
     }
 
-    /// Root under which host/target archives are unpacked, one dir per release.
-    pub fn sdk_root(&self) -> PathBuf {
-        self.data.join("sdk")
+    /// Shared, engine-independent toolchain store — the REAL host/target files,
+    /// downloaded once and reused across engine versions. Each engine's own
+    /// `toolchains/` dir just symlinks into here, so updating the engine never
+    /// touches (or re-downloads) the toolchains.
+    pub fn toolchains_store_dir(&self) -> PathBuf {
+        self.data.join("toolchains")
+    }
+
+    /// Parent of all installed engine versions.
+    pub fn engines_dir(&self) -> PathBuf {
+        self.data.join("engines")
+    }
+
+    /// A specific engine version's root — this IS `STAPPLER_ROOT` (the build
+    /// system and modules) for that version. Multiple versions coexist so a
+    /// project can pick which one it builds against.
+    pub fn engine_dir(&self, reference: &str) -> PathBuf {
+        self.engines_dir().join(reference)
     }
 
     /// Scratch directory for in-flight downloads (atomic temp → rename target).
@@ -121,7 +134,9 @@ mod tests {
             l.installed_manifest(),
             Path::new("/x/config/installed.json")
         );
-        assert_eq!(l.sdk_root(), Path::new("/x/data/sdk"));
+        assert_eq!(l.toolchains_store_dir(), Path::new("/x/data/toolchains"));
+        assert_eq!(l.engines_dir(), Path::new("/x/data/engines"));
+        assert_eq!(l.engine_dir("master"), Path::new("/x/data/engines/master"));
         assert_eq!(l.download_tmp(), Path::new("/x/cache/downloads"));
     }
 

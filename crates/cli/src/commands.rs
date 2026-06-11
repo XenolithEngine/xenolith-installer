@@ -277,8 +277,8 @@ mod tests {
         // Files placed and registry updated.
         assert!(ctx
             .layout
-            .sdk_root()
-            .join("sdk-v0alpha0/hosts/x86_64-unknown-linux-gnu/bin/xenolith")
+            .toolchains_store_dir()
+            .join("hosts/x86_64-unknown-linux-gnu/bin/xenolith")
             .exists());
 
         let after = run(&Command::List, &ctx).unwrap();

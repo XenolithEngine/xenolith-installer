@@ -1,0 +1,26 @@
+{
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+  "clangd.arguments": [
+    "--header-insertion=never",
+    "--compile-commands-dir=${workspaceFolder}",
+    "--query-driver={{HOST_BIN}}/clang-21"
+  ],
+  "debug.allowBreakpointsEverywhere": true,
+  "makefile.makefilePath": "Makefile",
+  "makefile.makePath": "{{HOST_BIN}}/make",
+  "makefile.configurations": [
+    {
+      "name": "Xenolith",
+      "makeArgs": ["-j8"]
+    }
+  ],
+  "makefile.launchConfigurations": [
+    {
+      "cwd": "${workspaceFolder}",
+      "binaryPath": "${workspaceFolder}/{{BINARY_PATH}}",
+      "binaryArgs": []
+    }
+  ],
+  "lldb-dap.executable-path": "{{HOST_BIN}}/lldb-dap"
+}

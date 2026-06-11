@@ -5,12 +5,17 @@
     install,
     uninstall,
     onInstallProgress,
+    engineStatus,
+    prepareEngine,
+    onEngineProgress,
     t,
     type Catalog,
     type CatalogRow,
     type InstallProgress,
+    type EngineInfo,
     type Kind,
   } from "./lib/api";
+  import Projects from "./lib/Projects.svelte";
 
   // English defaults so the UI never flashes raw keys; loadStrings() localises.
   const DEFAULTS: Record<string, string> = {
@@ -23,6 +28,31 @@
     "action-installing": "Installing…",
     "action-delete": "Delete",
     "action-cancel": "Cancel",
+    "engine-label": "Engine",
+    "engine-missing": "Engine SDK not installed yet",
+    "engine-prepare": "Prepare SDK",
+    "engine-preparing": "Preparing SDK…",
+    "nav-packages": "Packages",
+    "nav-projects": "Projects",
+    "project-new": "New Project",
+    "project-name": "Project name",
+    "project-name-rule": "Letters, digits, - and _ (no spaces)",
+    "project-folder": "Location",
+    "project-location": "Location (parent folder)",
+    "project-choose": "Choose…",
+    "project-engine": "Engine version",
+    "project-target": "Build target",
+    "run-host-only": "Run is only available when the target matches your host",
+    "project-create": "Create",
+    "project-build": "Build",
+    "project-run": "Run",
+    "project-open": "Open in",
+    "project-remove": "Remove",
+    "projects-empty": "No projects yet",
+    "engine-required": "Install the engine SDK and a host toolchain first",
+    "create-requirements": "Install the engine, your host toolchain and a target (in Packages) before creating a project",
+    "go-packages": "Go to Packages",
+    "build-building": "Building…",
     loading: "Loading catalogue…",
     "col-name": "Name",
     "col-size": "Size",
@@ -42,6 +72,9 @@
   let collapsed = $state<Record<Kind, boolean>>({ target: false, host: false });
   let progress = $state<Record<string, InstallProgress>>({});
   let busy = $state(false);
+  let engine = $state<EngineInfo | null>(null);
+  let enginePrep = $state<number | null>(null); // bytes downloaded, or null
+  let tab = $state<"packages" | "projects">("packages");
 
   const GROUP_ORDER: Kind[] = ["target", "host"];
   const groupTitle = (k: Kind) => (k === "target" ? S["group-targets"] : S["group-hosts"]);
@@ -163,15 +196,40 @@
     selected[key(r)] = !selected[key(r)];
   }
 
+  async function prepareSdk() {
+    if (enginePrep !== null) return;
+    enginePrep = 0;
+    error = null;
+    try {
+      engine = await prepareEngine();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      enginePrep = null;
+    }
+  }
+
   onMount(() => {
     loadStrings();
     refresh();
+    engineStatus().then((e) => (engine = e));
     const un = onInstallProgress((p) => {
       for (const row of selectedRows) if (row.id === p.id) progress[key(row)] = p;
       progress = { ...progress };
     });
+    // The engine bundle also downloads automatically before the first toolchain
+    // install; reflect that progress and pick up the version when it finishes.
+    const unEng = onEngineProgress((p) => {
+      if (p.phase === "done") {
+        enginePrep = null;
+        engineStatus().then((e) => (engine = e));
+      } else {
+        enginePrep = p.bytes;
+      }
+    });
     return () => {
       un.then((f) => f());
+      unEng.then((f) => f());
     };
   });
 </script>
@@ -179,14 +237,41 @@
 <div class="shell">
   <header>
     <h1>Xenolith Installer</h1>
+    <nav class="tabs">
+      <button class:active={tab === "packages"} onclick={() => (tab = "packages")}>
+        {S["nav-packages"]}
+      </button>
+      <button class:active={tab === "projects"} onclick={() => (tab = "projects")}>
+        {S["nav-projects"]}
+      </button>
+    </nav>
     <div class="meta">
-      {#if catalog}
+      {#if engine}
+        <span class="native">{S["engine-label"]} {engine.reference} · {engine.short}</span>
+      {/if}
+      {#if catalog && tab === "packages"}
         <span>release {catalog.release}</span>
         {#if catalog.nativeId}<span class="native">host {catalog.nativeId}</span>{/if}
       {/if}
     </div>
   </header>
 
+  {#if !engine || enginePrep !== null}
+    <div class="engine-bar">
+      {#if enginePrep !== null}
+        <span class="spinner"></span>
+        <span>{S["engine-preparing"]}</span>
+        <span class="muted">{(enginePrep / 1_000_000).toFixed(1)} MB</span>
+      {:else}
+        <span>{S["engine-missing"]}</span>
+        <button class="btn primary sm" onclick={prepareSdk}>{S["engine-prepare"]}</button>
+      {/if}
+    </div>
+  {/if}
+
+  {#if tab === "projects"}
+    <main><Projects {S} goToPackages={() => (tab = "packages")} /></main>
+  {:else}
   <main>
     {#if loading}
       <p class="muted">{S["loading"]}</p>
@@ -256,6 +341,7 @@
       {busy ? S["action-installing"] : `${S["action-install"]} (${selectedCount})`}
     </button>
   </footer>
+  {/if}
 
   {#if pending}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -297,6 +383,25 @@
     gap: 16px;
     color: var(--xeno-text-secondary);
     font-size: 12px;
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-left: 20px;
+    flex: 1;
+  }
+  .tabs button {
+    background: transparent;
+    border: none;
+    color: var(--xeno-text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: var(--xeno-radius-control);
+  }
+  .tabs button.active {
+    color: var(--xeno-accent);
+    background: rgba(252, 180, 0, 0.08);
   }
   .native {
     color: var(--xeno-accent);
@@ -503,6 +608,35 @@
   }
   .error {
     color: #ff6b6b;
+  }
+  .engine-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0 24px 8px;
+    padding: 10px 14px;
+    border: 1px solid var(--xeno-border-muted);
+    border-radius: var(--xeno-radius-control);
+    background: rgba(252, 180, 0, 0.06);
+    font-size: 13px;
+  }
+  .btn.sm {
+    padding: 4px 12px;
+    font-size: 12px;
+    margin-left: auto;
+  }
+  .spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--xeno-border);
+    border-top-color: var(--xeno-accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .overlay {
     position: fixed;

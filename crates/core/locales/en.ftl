@@ -27,6 +27,33 @@ phase-placing = Finishing
 loading = Loading catalogue…
 skipped-unsigned = skipped { $count } unsigned artifact(s)
 
+engine-label = Engine
+engine-missing = Engine SDK not installed yet
+engine-prepare = Prepare SDK
+engine-preparing = Preparing SDK…
+
+nav-packages = Packages
+nav-projects = Projects
+project-new = New Project
+project-name = Project name
+project-name-rule = Letters, digits, - and _ (no spaces)
+project-folder = Location
+project-location = Location (parent folder)
+project-choose = Choose…
+project-engine = Engine version
+project-target = Build target
+run-host-only = Run is only available when the target matches your host
+project-create = Create
+project-build = Build
+project-run = Run
+project-open = Open in
+project-remove = Remove
+projects-empty = No projects yet
+engine-required = Install the engine SDK and a host toolchain first
+create-requirements = Install the engine, your host toolchain and a target (in Packages) before creating a project
+go-packages = Go to Packages
+build-building = Building…
+
 col-name = Name
 col-size = Size
 col-version = Version

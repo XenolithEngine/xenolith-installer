@@ -1,0 +1,21 @@
+STAPPLER_ROOT ?= {{STAPPLER_ROOT}}
+LOCAL_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+
+LOCAL_EXECUTABLE := {{EXE}}
+
+LOCAL_MODULES_PATHS = \
+	$(STAPPLER_ROOT)/stappler/stappler-modules.mk \
+	$(STAPPLER_ROOT)/xenolith/xenolith-modules.mk
+
+LOCAL_MODULES := \
+	runtime \
+	xenolith_application \
+	xenolith_renderer_simpleui \
+	xenolith_backend_vk \
+	xenolith_resources_assets
+
+LOCAL_SRCS_DIRS := src
+LOCAL_INCLUDES_OBJS := src
+
+include $(STAPPLER_ROOT)/make/universal.mk
+

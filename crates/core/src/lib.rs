@@ -8,12 +8,15 @@
 
 pub mod catalog;
 pub mod dirs;
+#[cfg(feature = "engine")]
+pub mod engine_source;
 pub mod extract;
 pub mod hash;
 pub mod i18n;
 pub mod install;
 pub mod key_source;
 pub mod manifest;
+pub mod projects;
 pub mod state;
 pub mod transport;
 #[cfg(feature = "ftp")]

@@ -73,6 +73,16 @@ jobs:
         run: pnpm install --frozen-lockfile
         working-directory: ui
 
+      - name: Load release notes
+        id: notes
+        shell: bash
+        run: |
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            cat RELEASE_NOTES.md
+            echo RELEASE_NOTES_EOF
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build app bundles (unsigned)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -83,7 +93,7 @@ jobs:
           # On a tag push, publish to a draft release; otherwise just build.
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: ${{ github.ref_type == 'tag' && format('Xenolith Installer {0}', github.ref_name) || '' }}
-          releaseBody: "Unsigned desktop builds. Download the asset for your platform below."
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
 

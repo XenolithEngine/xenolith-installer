@@ -68,11 +68,134 @@ export async function uninstall(id: string, kind: Kind): Promise<void> {
   await invoke("uninstall_component", { id, kind });
 }
 
+export interface EngineInfo {
+  reference: string;
+  short: string;
+}
+
+export interface EngineProgress {
+  phase: "downloading" | "done";
+  bytes: number;
+}
+
+export async function engineStatus(): Promise<EngineInfo | null> {
+  if (!inTauri) return { reference: "master", short: "devbuild" };
+  return invoke<EngineInfo | null>("engine_status");
+}
+
+export async function prepareEngine(): Promise<EngineInfo> {
+  if (!inTauri) {
+    await new Promise((r) => setTimeout(r, 800));
+    return { reference: "master", short: "devbuild" };
+  }
+  return invoke<EngineInfo>("prepare_engine");
+}
+
+export async function onEngineProgress(
+  cb: (p: EngineProgress) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri) return () => {};
+  return listen<EngineProgress>("engine://progress", (e) => cb(e.payload));
+}
+
 export async function onInstallProgress(
   cb: (p: InstallProgress) => void,
 ): Promise<UnlistenFn> {
   if (!inTauri) return () => {};
   return listen<InstallProgress>("install://progress", (e) => cb(e.payload));
+}
+
+// ---- projects ----
+
+export interface Project {
+  name: string;
+  path: string;
+  engine: string;
+  target: string;
+  createdAt: string;
+}
+
+export async function projectEngines(): Promise<string[]> {
+  if (!inTauri) return ["master"];
+  return invoke<string[]>("project_engines");
+}
+
+export interface Targets {
+  targets: string[];
+  host: string;
+  hostInstalled: boolean;
+}
+
+export async function projectTargets(): Promise<Targets> {
+  if (!inTauri) {
+    return { targets: ["aarch64-apple-macosx"], host: "aarch64-apple-macosx", hostInstalled: true };
+  }
+  return invoke<Targets>("project_targets");
+}
+
+export async function listProjects(): Promise<Project[]> {
+  if (!inTauri) return [];
+  return invoke<Project[]>("list_projects");
+}
+
+export async function createProject(
+  location: string,
+  name: string,
+  engine: string,
+  target: string,
+): Promise<Project> {
+  if (!inTauri) {
+    return { name, path: `${location}/${name}`, engine, target, createdAt: "now" };
+  }
+  return invoke<Project>("create_project", { location, name, engine, target });
+}
+
+export async function removeProject(path: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("remove_project", { path });
+}
+
+export interface Editor {
+  id: string;
+  name: string;
+}
+
+export async function availableEditors(): Promise<Editor[]> {
+  if (!inTauri) {
+    return [
+      { id: "files", name: "Finder" },
+      { id: "vscode", name: "VS Code" },
+      { id: "claude", name: "Claude Code" },
+    ];
+  }
+  return invoke<Editor[]>("available_editors");
+}
+
+export async function openInEditor(path: string, editor: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("open_in_editor", { path, editor });
+}
+
+export async function buildProject(
+  path: string,
+  target: string,
+  run: boolean,
+): Promise<number> {
+  if (!inTauri) return 0;
+  return invoke<number>("build_project", { path, target, run });
+}
+
+export async function onBuildLine(cb: (line: string) => void): Promise<UnlistenFn> {
+  if (!inTauri) return () => {};
+  return listen<{ line: string }>("build://line", (e) => cb(e.payload.line));
+}
+
+/// Native folder picker (Tauri dialog plugin). Returns the chosen path or null.
+export async function pickFolder(): Promise<string | null> {
+  if (!inTauri) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const res = await open({ directory: true, multiple: false });
+  return typeof res === "string" ? res : null;
 }
 
 export async function t(key: string, args?: Record<string, string>): Promise<string> {

@@ -24,6 +24,7 @@ sys-locale = "0.3"
 pgp = "0.14"
 suppaftp = { version = "6", optional = true }
 ureq = { version = "2", optional = true }
+flate2 = { version = "1", optional = true }
 
 [features]
 default = []
@@ -32,6 +33,8 @@ default = []
 ftp = ["dep:suppaftp"]
 # Fetch the release public key from a keyserver over HTTPS.
 keyserver = ["dep:ureq"]
+# Fetch + unpack the engine source bundle (STAPPLER_ROOT) over HTTPS.
+engine = ["dep:ureq", "dep:flate2"]
 
 [dev-dependencies]
 tempfile = "3"
