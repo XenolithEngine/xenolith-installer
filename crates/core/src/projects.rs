@@ -150,10 +150,20 @@ fn render(tmpl: &str, engine_root: &Path, host_bin: &Path, host_triple: &str, ex
         .replace("{{EXE}}", exe))
 }
 
+/// The subdir the engine nests build output under — named after the host
+/// compiler binary: `clang.exe` on Windows, `cc` on macOS/Linux.
+pub fn host_cc_subdir() -> &'static str {
+    if std::env::consts::OS == "windows" {
+        "clang.exe"
+    } else {
+        "cc"
+    }
+}
+
 /// Project-relative path of the built binary for the running OS. macOS produces
 /// an `.app` bundle; Windows a `.exe`; elsewhere a plain ELF binary.
 fn host_binary_rel(host_triple: &str, exe: &str) -> String {
-    let base = format!("stappler-build/{host_triple}/debug/cc");
+    let base = format!("stappler-build/{host_triple}/debug/{}", host_cc_subdir());
     match std::env::consts::OS {
         "macos" => format!("{base}/{exe}.app/Contents/MacOS/{exe}"),
         "windows" => format!("{base}/{exe}.exe"),

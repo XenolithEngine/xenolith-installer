@@ -881,7 +881,8 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
     let out_dir = std::path::Path::new(path)
         .join("stappler-build")
         .join(target)
-        .join("debug/cc");
+        .join("debug")
+        .join(projects::host_cc_subdir());
     let candidates = [
         out_dir.join(format!("{exe_name}.app/Contents/MacOS/{exe_name}")), // macOS bundle
         out_dir.join(format!("{exe_name}.exe")),                           // Windows
