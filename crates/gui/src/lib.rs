@@ -100,6 +100,8 @@ struct EngineDto {
 struct EngineProgressDto {
     phase: &'static str,
     bytes: u64,
+    /// Server-reported total size (0 = unknown → show an indeterminate bar).
+    total: u64,
 }
 
 fn engine_dto(info: &EngineInfo) -> EngineDto {
@@ -249,7 +251,7 @@ fn ensure_engine(app: &AppHandle, layout: &Layout, force: bool) -> Result<Engine
     log::info!("ensure_engine: downloading engine '{ENGINE_REF}'");
     let mut last_step = u64::MAX;
     let info = EngineBundle::new(ENGINE_REF)
-        .install(layout, &mut |bytes| {
+        .install(layout, &mut |bytes, total| {
             // Throttle to ~one event per 256 KiB downloaded.
             let step = bytes / (256 * 1024);
             if step != last_step {
@@ -259,6 +261,7 @@ fn ensure_engine(app: &AppHandle, layout: &Layout, force: bool) -> Result<Engine
                     EngineProgressDto {
                         phase: "downloading",
                         bytes,
+                        total: total.unwrap_or(0),
                     },
                 );
             }
@@ -283,6 +286,7 @@ fn ensure_engine(app: &AppHandle, layout: &Layout, force: bool) -> Result<Engine
         EngineProgressDto {
             phase: "done",
             bytes: 0,
+            total: 0,
         },
     );
     Ok(info)
@@ -1534,10 +1538,22 @@ fn stream_cmd(app: &AppHandle, cmd: &mut std::process::Command) -> Result<i32, S
     BUILD_PID.store(child.id(), Ordering::Relaxed);
     let out = child.stdout.take();
     let err = child.stderr.take();
+    // A toolchain binary that aborts with SIGILL/SIGSEGV (e.g. a prebuilt clang
+    // compiled for a newer CPU baseline than this machine) shows up only as a
+    // cryptic "Illegal instruction" + "Error 132" deep in make's output. Flag it
+    // so we can append a plain-language hint instead of leaving the user staring
+    // at a raw crash dump.
+    let toolchain_crashed = std::sync::atomic::AtomicBool::new(false);
     let emit = |line: String| {
         // The engine colorizes its output; strip ANSI so both the UI console and
         // the log file are plain text.
         let line = strip_ansi(&line);
+        if line.contains("Illegal instruction")
+            || line.contains("Bad CPU type")
+            || (line.contains("Segmentation fault") && line.contains("/bin/"))
+        {
+            toolchain_crashed.store(true, Ordering::Relaxed);
+        }
         log::info!("> {line}");
         let _ = app.emit("build://line", BuildLineDto { line });
     };
@@ -1553,6 +1569,18 @@ fn stream_cmd(app: &AppHandle, cmd: &mut std::process::Command) -> Result<i32, S
     BUILD_PID.store(0, Ordering::Relaxed);
     let code = status.code().unwrap_or(-1);
     log::info!("exit: {code}");
+    if code != 0 && toolchain_crashed.load(Ordering::Relaxed) {
+        let hint = "⚠ The compiler crashed (Illegal instruction). The installed \
+            toolchain is likely incompatible with this CPU — please report this to \
+            the Xenolith maintainers with your Mac model.";
+        log::error!("{hint}");
+        let _ = app.emit(
+            "build://line",
+            BuildLineDto {
+                line: hint.to_string(),
+            },
+        );
+    }
     Ok(code)
 }
 

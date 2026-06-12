@@ -75,11 +75,12 @@ impl EngineBundle {
 
     /// Download the bundle, verify it against `SHA256SUMS.txt`, and unpack it so
     /// `layout.engine_dir("master")` directly contains the engine tree. `progress`
-    /// reports cumulative downloaded bytes.
+    /// is called as `(downloaded, total)`, where `total` is the server-reported
+    /// content length (`None` if the server didn't send one).
     pub fn install(
         &self,
         layout: &Layout,
-        progress: &mut dyn FnMut(u64),
+        progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<EngineInfo, EngineError> {
         let sums = parse_checksums(&http_get_text(&self.checksums_url())?);
         let expected = sums
@@ -126,11 +127,18 @@ fn http_get_text(url: &str) -> Result<String, EngineError> {
         .map_err(|e| EngineError::Http(e.to_string()))
 }
 
-fn http_get_bytes(url: &str, progress: &mut dyn FnMut(u64)) -> Result<Vec<u8>, EngineError> {
-    let mut reader = ureq::get(url)
+fn http_get_bytes(
+    url: &str,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<Vec<u8>, EngineError> {
+    let resp = ureq::get(url)
         .call()
-        .map_err(|e| EngineError::Http(e.to_string()))?
-        .into_reader();
+        .map_err(|e| EngineError::Http(e.to_string()))?;
+    // Total size for a determinate progress bar; absent on chunked responses.
+    let total = resp
+        .header("Content-Length")
+        .and_then(|s| s.parse::<u64>().ok());
+    let mut reader = resp.into_reader();
     let mut buf = Vec::new();
     let mut chunk = [0u8; 64 * 1024];
     loop {
@@ -141,7 +149,7 @@ fn http_get_bytes(url: &str, progress: &mut dyn FnMut(u64)) -> Result<Vec<u8>, E
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
-        progress(buf.len() as u64);
+        progress(buf.len() as u64, total);
     }
     Ok(buf)
 }

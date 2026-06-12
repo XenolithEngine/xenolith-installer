@@ -1,6 +1,7 @@
 # Русский каталог. Подписи соответствуют UI Kit.
 app-title = Установщик Xenolith
 
+group-engine = Движок
 group-hosts = Средства разработки
 group-targets = Платформы рантайма
 
@@ -60,6 +61,7 @@ engine-label = Движок
 engine-missing = SDK движка ещё не установлен
 engine-prepare = Подготовить SDK
 engine-preparing = Подготовка SDK…
+engine-update = Обновить движок (перекачать)
 
 nav-packages = Пакеты
 nav-projects = Проекты

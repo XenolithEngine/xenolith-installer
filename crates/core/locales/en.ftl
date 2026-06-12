@@ -1,6 +1,7 @@
 # English (fallback) catalogue. Labels mirror the UI Kit.
 app-title = Xenolith Installer
 
+group-engine = Engine
 group-hosts = Development Tools
 group-targets = Runtime Platforms
 
@@ -60,6 +61,7 @@ engine-label = Engine
 engine-missing = Engine SDK not installed yet
 engine-prepare = Prepare SDK
 engine-preparing = Preparing SDK…
+engine-update = Update engine (re-download)
 
 nav-packages = Packages
 nav-projects = Projects

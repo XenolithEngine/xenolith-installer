@@ -77,6 +77,7 @@ export interface EngineInfo {
 export interface EngineProgress {
   phase: "downloading" | "done";
   bytes: number;
+  total: number; // server-reported size; 0 = unknown
 }
 
 export async function engineStatus(): Promise<EngineInfo | null> {

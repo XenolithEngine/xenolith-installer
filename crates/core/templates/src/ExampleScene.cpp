@@ -5,7 +5,7 @@
 
 namespace STAPPLER_VERSIONIZED stappler::xenolith::app {
 
-bool ExampleScene::init(NotNull<AppThread> app, NotNull<AppWindow> window,
+bool ExampleScene::init(NotNull<AppThread> app, NotNull<core::RenderServerChannel> window,
 		const core::FrameConstraints &constraints) {
 	using namespace basic2d;
 

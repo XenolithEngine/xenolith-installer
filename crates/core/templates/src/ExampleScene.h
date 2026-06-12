@@ -11,7 +11,7 @@ class ExampleScene : public basic2d::Scene2d {
 public:
 	virtual ~ExampleScene() = default;
 
-	virtual bool init(NotNull<AppThread>, NotNull<AppWindow>,
+	virtual bool init(NotNull<AppThread>, NotNull<core::RenderServerChannel>,
 			const core::FrameConstraints &) override;
 	virtual void handleContentSizeDirty() override;
 

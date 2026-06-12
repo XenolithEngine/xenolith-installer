@@ -35,6 +35,7 @@
 
   // English defaults so the UI never flashes raw keys; loadStrings() localises.
   const DEFAULTS: Record<string, string> = {
+    "group-engine": "Engine",
     "group-hosts": "Development Tools",
     "group-targets": "Runtime Platforms",
     "status-installed": "Installed",
@@ -48,6 +49,7 @@
     "engine-missing": "Engine SDK not installed yet",
     "engine-prepare": "Prepare SDK",
     "engine-preparing": "Preparing SDK…",
+    "engine-update": "Update engine (re-download)",
     "open-working-dir": "Open working directory",
     "nav-packages": "Packages",
     "nav-projects": "Projects",
@@ -119,14 +121,18 @@
   let error = $state<string | null>(null);
   let selected = $state<Record<string, boolean>>({});
   let collapsed = $state<Record<Kind, boolean>>({ target: false, host: false });
+  let engineCollapsed = $state(false);
   let progress = $state<Record<string, InstallProgress>>({});
   let busy = $state(false);
   let engine = $state<EngineInfo | null>(null);
   let enginePrep = $state<number | null>(null); // bytes downloaded, or null
+  let enginePrepTotal = $state(0); // total size for the re-download (0 = unknown)
   let tab = $state<"packages" | "projects">("packages");
   let settingsOpen = $state(false);
 
-  const GROUP_ORDER: Kind[] = ["target", "host"];
+  // Engine first (rendered separately), then dev tools (hosts), then runtime
+  // platforms (targets) — one consistent top-to-bottom order.
+  const GROUP_ORDER: Kind[] = ["host", "target"];
   const groupTitle = (k: Kind) => (k === "target" ? S["group-targets"] : S["group-hosts"]);
   const key = (r: CatalogRow) => `${r.kind}:${r.id}`;
   const displayName = (r: CatalogRow) => (r.variant ? `${r.triple} +${r.variant}` : r.triple);
@@ -400,6 +406,7 @@
   let heroBooting = $state(false);
   let heroStep = $state<"engine" | "host" | "target" | "">("");
   let heroBytes = $state(0);
+  let heroTotal = $state(0); // total size of the current step (0 = unknown)
   let heroPhase = $state("downloading");
   let heroPct = $state<number | null>(null); // null = size unknown (show bytes)
   let heroDone = $state(false);
@@ -428,6 +435,7 @@
     heroError = null;
     heroStep = "engine";
     heroBytes = 0;
+    heroTotal = 0;
     heroPhase = "downloading";
     heroPct = null;
     error = null;
@@ -492,6 +500,7 @@
         heroPhase = p.phase;
         heroBytes = p.bytes;
         const size = sizeOf(p.id);
+        heroTotal = size;
         heroPct =
           p.phase === "downloading"
             ? size
@@ -505,15 +514,20 @@
     const unEng = onEngineProgress((p) => {
       if (p.phase === "done") {
         enginePrep = null;
+        enginePrepTotal = 0;
         engineStatus().then((e) => (engine = e));
       } else {
         enginePrep = p.bytes;
+        enginePrepTotal = p.total;
       }
       if (heroBooting && p.phase !== "done") {
         heroStep = "engine";
         heroPhase = "downloading";
         heroBytes = p.bytes;
-        heroPct = null; // engine bundle has no known size upfront
+        heroTotal = p.total;
+        // Determinate bar when the server sent a Content-Length; otherwise fall
+        // back to the byte counter so it never looks frozen.
+        heroPct = p.total > 0 ? Math.min(100, (p.bytes / p.total) * 100) : null;
       }
     });
     return () => {
@@ -553,7 +567,7 @@
               <span class="hdot"></span><span class="hlabel">{step[1]}</span>
               {#if heroStep === step[0]}
                 <span class="hbytes">
-                  {S["phase-" + heroPhase] ?? heroPhase}{#if heroPhase === "downloading"} · {heroPct != null ? Math.round(heroPct) + "%" : fmtBytes(heroBytes)}{/if}
+                  {S["phase-" + heroPhase] ?? heroPhase}{#if heroPhase === "downloading"} · {#if heroPct != null}{Math.round(heroPct)}%{#if heroTotal > 0} · {fmtBytes(heroBytes)} / {fmtBytes(heroTotal)}{/if}{:else}{fmtBytes(heroBytes)}{/if}{/if}
                 </span>
               {/if}
             </div>
@@ -588,9 +602,6 @@
       </button>
     </nav>
     <div class="meta">
-      {#if engine}
-        <span class="native">{S["engine-label"]} {engine.reference} · {engine.short}</span>
-      {/if}
       {#if catalog && tab === "packages"}
         <span>release {catalog.release}</span>
         {#if catalog.nativeId}<span class="native">host {catalog.nativeId}</span>{/if}
@@ -637,19 +648,6 @@
     </div>
   </header>
 
-  {#if !engine || enginePrep !== null}
-    <div class="engine-bar">
-      {#if enginePrep !== null}
-        <span class="spinner"></span>
-        <span>{S["engine-preparing"]}</span>
-        <span class="muted">{(enginePrep / 1_000_000).toFixed(1)} MB</span>
-      {:else}
-        <span>{S["engine-missing"]}</span>
-        <button class="btn primary sm" onclick={prepareSdk}>{S["engine-prepare"]}</button>
-      {/if}
-    </div>
-  {/if}
-
   {#if tab === "projects"}
     <main><Projects {S} {createSignal} goToPackages={() => (tab = "packages")} /></main>
   {:else}
@@ -667,6 +665,39 @@
           <span class="c-size">{S["col-size"]}</span>
           <span class="c-status">{S["col-status"]}</span>
         </div>
+
+        <button class="group" onclick={() => (engineCollapsed = !engineCollapsed)}>
+          <svg class="chev" class:open={!engineCollapsed} width="12" height="12" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          {S["group-engine"]}
+        </button>
+        {#if !engineCollapsed}
+          <div class="row native">
+            <span class="c-check"></span>
+            <span class="c-name">
+              {#if engine}{engine.reference}<span class="variant"> · {engine.short}</span>{:else}master{/if}
+            </span>
+            <span class="c-size">—</span>
+            <span class="c-status">
+              {#if enginePrep !== null}
+                <div class="dl">
+                  <div class="bar"><div class="fill" class:pulse={enginePrepTotal === 0} style="width:{enginePrepTotal > 0 ? Math.min(100, (enginePrep / enginePrepTotal) * 100) : 100}%"></div></div>
+                  <span class="pct">{enginePrepTotal > 0 ? Math.round((enginePrep / enginePrepTotal) * 100) + "%" : fmtBytes(enginePrep)}</span>
+                </div>
+              {:else if engine}
+                <span class="badge installed">{S["status-installed"]}</span>
+                <button class="repair" title={S["engine-update"]} onclick={prepareSdk} disabled={busy} aria-label={S["engine-update"]}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" />
+                  </svg>
+                </button>
+              {:else}
+                <button class="btn primary sm" onclick={prepareSdk} disabled={busy}>{S["engine-prepare"]}</button>
+              {/if}
+            </span>
+          </div>
+        {/if}
 
         {#each GROUP_ORDER as kind (kind)}
           <button class="group" onclick={() => (collapsed[kind] = !collapsed[kind])}>
@@ -1506,29 +1537,10 @@
   .error {
     color: #ff6b6b;
   }
-  .engine-bar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin: 0 24px 8px;
-    padding: 10px 14px;
-    border: 1px solid var(--xeno-border-muted);
-    border-radius: var(--xeno-radius-control);
-    background: rgba(252, 180, 0, 0.06);
-    font-size: 13px;
-  }
   .btn.sm {
     padding: 4px 12px;
     font-size: 12px;
     margin-left: auto;
-  }
-  .spinner {
-    width: 14px;
-    height: 14px;
-    border: 2px solid var(--xeno-border);
-    border-top-color: var(--xeno-accent);
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
   }
   @keyframes spin {
     to {

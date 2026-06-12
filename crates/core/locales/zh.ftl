@@ -1,6 +1,7 @@
 # 简体中文目录。标签与 UI Kit 对应。
 app-title = Xenolith 安装器
 
+group-engine = 引擎
 group-hosts = 开发工具
 group-targets = 运行平台
 
@@ -60,6 +61,7 @@ engine-label = 引擎
 engine-missing = 引擎 SDK 尚未安装
 engine-prepare = 准备 SDK
 engine-preparing = 正在准备 SDK…
+engine-update = 更新引擎（重新下载）
 
 nav-packages = 软件包
 nav-projects = 项目
