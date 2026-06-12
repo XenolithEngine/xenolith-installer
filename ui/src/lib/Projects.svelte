@@ -11,17 +11,26 @@
     pickFolder,
     availableEditors,
     openInEditor,
+    openTerminal,
+    cleanProject,
+    projectSize,
+    cancelBuild,
     type Project,
     type Editor,
   } from "./api";
 
-  let { S, goToPackages }: { S: Record<string, string>; goToPackages: () => void } = $props();
+  let {
+    S,
+    goToPackages,
+    createSignal = 0,
+  }: { S: Record<string, string>; goToPackages: () => void; createSignal?: number } = $props();
 
   let projects = $state<Project[]>([]);
   let engines = $state<string[]>([]);
   let targets = $state<string[]>([]);
   let editors = $state<Editor[]>([]);
   let openMenu = $state<string | null>(null);
+  let buildMenu = $state<string | null>(null);
   let host = $state("");
   let consoleEl = $state<HTMLElement | null>(null);
   let view = $state<"list" | "new">("list");
@@ -45,6 +54,9 @@
   const ready = $derived(engines.length > 0 && hostInstalled && targets.length > 0);
   const canCreate = $derived(nameValid && !!location && !!engine && !!newTarget && ready && !creating);
   const targetOf = (p: Project) => selTarget[p.path] ?? (p.target || host);
+  // A same-arch target (e.g. <host>+sprt) is native and runnable; only a
+  // different-arch triple is a true cross-compile that can't run here.
+  const runnable = (p: Project) => targetOf(p).split("+")[0] === host;
 
   async function reload() {
     const [pj, en, tg, ed] = await Promise.all([
@@ -64,6 +76,23 @@
     if (!newTarget || !targets.includes(newTarget)) {
       newTarget = targets.includes(host) ? host : (targets[0] ?? "");
     }
+    loadSizes();
+  }
+
+  // Per-project on-disk size (mostly stappler-build); filled in after the list.
+  let sizes = $state<Record<string, number>>({});
+  async function loadSizes() {
+    for (const p of projects) {
+      projectSize(p.path)
+        .then((b) => (sizes = { ...sizes, [p.path]: b }))
+        .catch(() => {});
+    }
+  }
+  function fmtBytes(n: number): string {
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + " GB";
+    if (n >= 1e6) return (n / 1e6).toFixed(0) + " MB";
+    if (n >= 1e3) return (n / 1e3).toFixed(0) + " KB";
+    return n + " B";
   }
 
   async function openIn(p: Project, editor: string) {
@@ -108,13 +137,60 @@
     log = [];
     error = null;
     try {
-      const code = await buildProject(p.path, targetOf(p), run);
-      log = [...log, `— exit ${code} —`];
+      await buildProject(p.path, targetOf(p), run);
     } catch (e) {
       error = String(e);
     } finally {
       buildingPath = null;
+      projectSize(p.path).then((b) => (sizes = { ...sizes, [p.path]: b }));
     }
+  }
+
+  async function clean(p: Project) {
+    if (buildingPath) return;
+    try {
+      await cleanProject(p.path);
+      log = [...log, `— cleaned ${p.name} —`];
+      sizes = { ...sizes, [p.path]: await projectSize(p.path) };
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function rebuild(p: Project) {
+    if (buildingPath) return;
+    try {
+      await cleanProject(p.path);
+    } catch (e) {
+      error = String(e);
+      return;
+    }
+    await build(p, false);
+  }
+
+  async function terminal(p: Project) {
+    try {
+      await openTerminal(p.path);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function cancel() {
+    try {
+      await cancelBuild();
+      log = [...log, "— cancelled —"];
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // Colour build-console lines: errors red, warnings amber, success green.
+  function lineClass(l: string): string {
+    if (/(^|[\s[])(error:|error |fatal|\*\*\*)/i.test(l) || l.includes("✗")) return "err";
+    if (/(^|\s)warning:/i.test(l)) return "warn";
+    if (l.startsWith("✓")) return "ok";
+    return "";
   }
 
   async function remove(p: Project) {
@@ -128,6 +204,11 @@
       log = [...log, line];
     });
     return () => un.then((f) => f());
+  });
+
+  // The hero's "Create first project" bumps createSignal → open the New form.
+  $effect(() => {
+    if (createSignal > 0) view = "new";
   });
 </script>
 
@@ -216,7 +297,9 @@
       {#each projects as p (p.path)}
         <div class="proj">
           <div class="info">
-            <span class="pname">{p.name}</span>
+            <span class="pname"
+              >{p.name}{#if sizes[p.path] != null}<span class="psize"> · {fmtBytes(sizes[p.path])}</span>{/if}</span
+            >
             <span class="ppath">{p.path}</span>
             <span class="peng">{S["engine-label"]} {p.engine}</span>
           </div>
@@ -230,17 +313,52 @@
             >
               {#each targets as t (t)}<option value={t}>{t}</option>{/each}
             </select>
-            <button class="btn ghost" onclick={() => build(p, false)} disabled={!!buildingPath}>
-              {buildingPath === p.path ? S["build-building"] : S["project-build"]}
-            </button>
             <button
               class="btn primary"
               onclick={() => build(p, true)}
-              disabled={!!buildingPath || targetOf(p) !== host}
-              title={targetOf(p) !== host ? S["run-host-only"] : ""}
+              disabled={!!buildingPath || !runnable(p)}
+              title={!runnable(p) ? S["run-host-only"] : ""}
             >
               {S["project-run"]}
             </button>
+            <div class="split">
+              <button class="btn ghost split-main" onclick={() => build(p, false)} disabled={!!buildingPath}>
+                {buildingPath === p.path ? S["build-building"] : S["project-build"]}
+              </button>
+              <button
+                class="btn ghost split-chev"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  buildMenu = buildMenu === p.path ? null : p.path;
+                }}
+                disabled={!!buildingPath}
+                aria-label={S["project-rebuild"]}
+              >
+                <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </button>
+              {#if buildMenu === p.path}
+                <div class="menu build-menu">
+                  <button class="menu-item" onclick={() => { buildMenu = null; rebuild(p); }}>
+                    <svg class="eicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" />
+                    </svg>
+                    {S["project-rebuild"]}
+                  </button>
+                  <button class="menu-item" onclick={() => { buildMenu = null; clean(p); }}>
+                    <svg class="eicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l9.6-9.6a1 1 0 0 1 1.4 0l5.6 5.6a1 1 0 0 1 0 1.4L13 21" />
+                      <path d="M22 21H7" /><path d="m5 11 9 9" />
+                    </svg>
+                    {S["project-clean"]}
+                  </button>
+                </div>
+              {/if}
+            </div>
+            {#if buildingPath === p.path}
+              <button class="btn ghost danger" onclick={cancel}>{S["action-cancel"]}</button>
+            {/if}
             {#if editors.length}
               <div class="open-wrap">
                 <button
@@ -250,10 +368,19 @@
                     openMenu = openMenu === p.path ? null : p.path;
                   }}
                 >
-                  {S["project-open"]} ▾
+                  {S["project-open"]}
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
                 </button>
                 {#if openMenu === p.path}
                   <div class="menu">
+                    <button class="menu-item" onclick={() => { openMenu = null; terminal(p); }}>
+                      <svg class="eicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="m4 17 6-6-6-6" /><path d="M12 19h8" />
+                      </svg>
+                      {S["project-terminal"]}
+                    </button>
                     {#each editors as ed (ed.id)}
                       <button class="menu-item" onclick={() => openIn(p, ed.id)}>
                         {#if ed.id === "files"}
@@ -291,7 +418,16 @@
                 {/if}
               </div>
             {/if}
-            <button class="btn ghost danger" onclick={() => remove(p)}>{S["project-remove"]}</button>
+            <button
+              class="iconbtn danger"
+              onclick={() => remove(p)}
+              title={S["project-remove"]}
+              aria-label={S["project-remove"]}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6" />
+              </svg>
+            </button>
           </div>
         </div>
       {/each}
@@ -299,12 +435,14 @@
   </section>
 
     {#if log.length}
-      <pre class="console" bind:this={consoleEl}>{log.join("\n")}</pre>
+      <div class="console" bind:this={consoleEl}>
+        {#each log as line, i (i)}<div class="ln {lineClass(line)}">{line || " "}</div>{/each}
+      </div>
     {/if}
   {/if}
 </div>
 
-<svelte:window onclick={() => (openMenu = null)} />
+<svelte:window onclick={() => { openMenu = null; buildMenu = null; }} />
 
 <style>
   .projects {
@@ -422,6 +560,34 @@
   .pname {
     font-weight: 600;
   }
+  .psize {
+    font-weight: 400;
+    color: var(--xeno-text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .iconbtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    background: transparent;
+    border: 1px solid var(--xeno-border-muted);
+    border-radius: var(--xeno-radius-control);
+    color: var(--xeno-text-secondary);
+    flex: 0 0 auto;
+  }
+  .iconbtn:hover:not(:disabled) {
+    color: var(--xeno-text);
+    border-color: var(--xeno-border);
+  }
+  .iconbtn.danger:hover:not(:disabled) {
+    color: #ff6b6b;
+    border-color: #ff6b6b;
+  }
+  .iconbtn:disabled {
+    opacity: 0.4;
+  }
   .ppath {
     font-size: 12px;
     color: var(--xeno-text-secondary);
@@ -437,9 +603,12 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    flex: 0 0 auto;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
   .tsel {
+    order: -2; /* target select stays first, before "Open in" */
     background: var(--xeno-bg);
     border: 1px solid var(--xeno-border);
     border-radius: var(--xeno-radius-control);
@@ -450,6 +619,7 @@
   }
   .open-wrap {
     position: relative;
+    order: -1; /* "Open in" first among the buttons, right after the target select */
   }
   .menu {
     position: absolute;
@@ -478,6 +648,28 @@
   }
   .menu-item:hover {
     background: rgba(252, 180, 0, 0.1);
+  }
+  .split {
+    position: relative;
+    display: inline-flex;
+  }
+  .btn.split-main {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .btn.split-chev {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    margin-left: -1px;
+    padding-left: 8px;
+    padding-right: 8px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .chev {
+    width: 14px;
+    height: 14px;
+    vertical-align: middle;
   }
   .eicon {
     width: 18px;
@@ -510,12 +702,27 @@
     border: 1px solid var(--xeno-border-muted);
     border-radius: var(--xeno-radius-control);
     padding: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     font-size: 12px;
     line-height: 1.45;
     max-height: 320px;
     overflow: auto;
-    white-space: pre-wrap;
     margin: 0;
+  }
+  .ln {
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--xeno-text-secondary);
+  }
+  .ln.err {
+    color: #ff6b6b;
+  }
+  .ln.warn {
+    color: #ffcc66;
+  }
+  .ln.ok {
+    color: #6bdc8f;
+    font-weight: 600;
   }
   .muted {
     color: var(--xeno-text-secondary);

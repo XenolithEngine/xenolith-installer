@@ -9,14 +9,29 @@
     prepareEngine,
     onEngineProgress,
     openWorkingDir,
+    installForSystem,
+    diskUsage,
+    removeEngine,
+    getSettings,
+    setSettings,
+    setDataDir,
+    setLang,
+    pickFolder,
+    diagnosticsReport,
+    runDoctor,
+    projectTargets,
     t,
+    type AppSettings,
+    type DoctorCheck,
     type Catalog,
     type CatalogRow,
     type InstallProgress,
     type EngineInfo,
     type Kind,
+    type Storage,
   } from "./lib/api";
   import Projects from "./lib/Projects.svelte";
+  import logoUrl from "./assets/logo.webp";
 
   // English defaults so the UI never flashes raw keys; loadStrings() localises.
   const DEFAULTS: Record<string, string> = {
@@ -50,7 +65,39 @@
     "project-run": "Run",
     "project-open": "Open in",
     "project-remove": "Remove",
+    "project-terminal": "Terminal",
+    "project-clean": "Clean",
+    "project-rebuild": "Rebuild",
     "projects-empty": "No projects yet",
+    "install-all": "Install everything for my system",
+    "install-all-hint": "Engine + your host toolchain + the native target",
+    "action-repair": "Repair (re-download)",
+    "storage-title": "Disk usage",
+    "storage-engines": "Engines",
+    "storage-hosts": "Host toolchains",
+    "storage-targets": "Targets",
+    "storage-total": "Total",
+    "hero-sub": "The cross-platform engine SDK. Get set up in one click.",
+    "hero-done": "All set!",
+    "hero-create": "Create your first project",
+    "hero-retry": "Try again",
+    "hero-step-engine": "Engine",
+    "hero-step-host": "Host toolchain",
+    "hero-step-target": "Targets",
+    "hero-manual": "Detailed setup",
+    "hero-preview": "Onboarding (preview)",
+    "doctor-title": "Check installation",
+    "report-copy": "Copy diagnostics",
+    "report-copied": "Diagnostics copied to clipboard",
+    "settings-title": "Settings",
+    "settings-language": "Language",
+    "settings-auto": "Auto",
+    "settings-jobs": "Parallel build jobs",
+    "settings-datadir": "Data directory",
+    "settings-reset": "Reset",
+    "settings-restart": "Changing the data directory takes effect after a restart.",
+    "datadir-no-space": "Path must not contain spaces",
+    "project-choose": "Choose…",
     "engine-required": "Install the engine SDK and a host toolchain first",
     "create-requirements": "Install the engine, your host toolchain and a target (in Packages) before creating a project",
     "go-packages": "Go to Packages",
@@ -117,6 +164,56 @@
     const keys = Object.keys(DEFAULTS);
     const entries = await Promise.all(keys.map(async (k) => [k, await t(k)] as const));
     S = { ...S, ...Object.fromEntries(entries) };
+  }
+
+  // ---- settings ----
+  let settingsModal = $state(false);
+  let appSettings = $state<AppSettings | null>(null);
+  let jobsInput = $state<string>("");
+
+  async function loadSettings() {
+    appSettings = await getSettings();
+    setLang(appSettings.language);
+    jobsInput = appSettings.jobs != null ? String(appSettings.jobs) : "";
+  }
+  async function openSettings() {
+    settingsOpen = false;
+    appSettings = await getSettings();
+    jobsInput = appSettings.jobs != null ? String(appSettings.jobs) : "";
+    settingsModal = true;
+  }
+  async function chooseLanguage(lang: string | null) {
+    if (!appSettings) return;
+    appSettings = { ...appSettings, language: lang };
+    setLang(lang);
+    await setSettings(lang, appSettings.jobs);
+    await loadStrings(); // re-fetch all strings in the new language
+  }
+  async function applyJobs() {
+    if (!appSettings) return;
+    const n = jobsInput.trim() === "" ? null : Math.max(1, parseInt(jobsInput, 10) || 0) || null;
+    appSettings = { ...appSettings, jobs: n };
+    await setSettings(appSettings.language, n);
+  }
+  async function chooseDataDir() {
+    const dir = await pickFolder();
+    if (!dir) return;
+    // GNU make can't handle a space in STAPPLER_ROOT, so the data dir must be
+    // space-free.
+    if (/\s/.test(dir)) {
+      showToast(S["datadir-no-space"]);
+      return;
+    }
+    try {
+      await setDataDir(dir);
+      appSettings = await getSettings();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function resetDataDir() {
+    await setDataDir(null);
+    appSettings = await getSettings();
   }
 
   async function computeUpdateLabels() {
@@ -199,6 +296,170 @@
     selected[key(r)] = !selected[key(r)];
   }
 
+  // One-click: engine + native host + native target.
+  async function installEverything() {
+    if (busy) return;
+    busy = true;
+    error = null;
+    try {
+      await installForSystem();
+      await refresh();
+      engine = await engineStatus();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Repair = re-download + overwrite the installed component.
+  async function repair(row: CatalogRow) {
+    if (busy) return;
+    busy = true;
+    error = null;
+    try {
+      progress[key(row)] = { id: row.id, phase: "downloading", bytes: 0 };
+      await install(row.id, row.kind);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      progress = {};
+      busy = false;
+    }
+  }
+
+  // ---- storage / disk usage ----
+  let storageOpen = $state(false);
+  let storage = $state<Storage | null>(null);
+  let storageLoading = $state(false);
+  async function openStorage() {
+    settingsOpen = false;
+    storageOpen = true;
+    storageLoading = true;
+    try {
+      storage = await diskUsage();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      storageLoading = false;
+    }
+  }
+  async function pruneEngine(ref: string) {
+    try {
+      await removeEngine(ref);
+      await openStorage();
+      engine = await engineStatus();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  function fmtBytes(n: number): string {
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + " GB";
+    if (n >= 1e6) return (n / 1e6).toFixed(0) + " MB";
+    if (n >= 1e3) return (n / 1e3).toFixed(0) + " KB";
+    return n + " B";
+  }
+
+  // ---- diagnostics + doctor ----
+  let toast = $state<string | null>(null);
+  function showToast(msg: string) {
+    toast = msg;
+    setTimeout(() => (toast = null), 2200);
+  }
+  async function copyReport() {
+    settingsOpen = false;
+    try {
+      const report = await diagnosticsReport();
+      await navigator.clipboard.writeText(report);
+      showToast(S["report-copied"] ?? "Copied");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  let doctorModal = $state(false);
+  let doctorChecks = $state<DoctorCheck[]>([]);
+  let doctorLoading = $state(false);
+  async function openDoctor() {
+    settingsOpen = false;
+    doctorModal = true;
+    doctorLoading = true;
+    try {
+      doctorChecks = await runDoctor();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      doctorLoading = false;
+    }
+  }
+
+  // ---- onboarding hero ----
+  let bootHostInstalled = $state(false);
+  let bootTargets = $state(0);
+  let manualMode = $state(false); // user chose "detailed settings"
+  let heroPreview = $state(false); // gear → preview onboarding even when set up
+  let heroBooting = $state(false);
+  let heroStep = $state<"engine" | "host" | "target" | "">("");
+  let heroBytes = $state(0);
+  let heroPhase = $state("downloading");
+  let heroPct = $state<number | null>(null); // null = size unknown (show bytes)
+  let heroDone = $state(false);
+  let heroError = $state<string | null>(null);
+  const sizeOf = (id: string) => catalog?.rows.find((r) => r.id === id)?.size ?? 0;
+  // Truly empty system → show the onboarding hero.
+  const freshSystem = $derived(!engine && !bootHostInstalled && bootTargets === 0);
+  // Don't decide hero-vs-shell until the first boot-state probe resolves —
+  // otherwise the hero flashes for a frame on the default (all-empty) state.
+  let bootChecked = $state(false);
+  const showHero = $derived(bootChecked && ((freshSystem && !manualMode) || heroPreview));
+
+  async function loadBootState() {
+    try {
+      const tg = await projectTargets();
+      bootHostInstalled = tg.hostInstalled;
+      bootTargets = tg.targets.length;
+    } catch {
+      /* offline / not ready */
+    }
+  }
+  async function startBootstrap() {
+    if (heroBooting) return;
+    heroBooting = true;
+    heroDone = false;
+    heroError = null;
+    heroStep = "engine";
+    heroBytes = 0;
+    heroPhase = "downloading";
+    heroPct = null;
+    error = null;
+    try {
+      await installForSystem();
+      heroStep = "";
+      heroBooting = false;
+      heroDone = true; // shows the "create first project" CTA
+      engine = await engineStatus();
+      await loadBootState();
+      await refresh();
+    } catch (e) {
+      heroError = String(e);
+      heroBooting = false;
+      heroStep = "";
+    }
+  }
+  function stepDone(k: string): boolean {
+    const order = ["engine", "host", "target"];
+    return order.indexOf(k) < order.indexOf(heroStep || "engine");
+  }
+
+  // Leave the hero and jump straight into the New Project form.
+  let createSignal = $state(0);
+  function goCreateProject() {
+    heroPreview = false;
+    manualMode = true;
+    heroDone = false;
+    tab = "projects";
+    createSignal++;
+  }
+
   async function prepareSdk() {
     if (enginePrep !== null) return;
     enginePrep = 0;
@@ -213,12 +474,31 @@
   }
 
   onMount(() => {
-    loadStrings();
+    // Settings first so the right language is active before strings load.
+    loadSettings().then(loadStrings);
     refresh();
-    engineStatus().then((e) => (engine = e));
+    // Resolve engine + boot state before unveiling the UI, so the hero/shell
+    // choice is made from real data, not the empty defaults.
+    Promise.all([
+      engineStatus().then((e) => (engine = e)),
+      loadBootState(),
+    ]).finally(() => (bootChecked = true));
     const un = onInstallProgress((p) => {
       for (const row of selectedRows) if (row.id === p.id) progress[key(row)] = p;
       progress = { ...progress };
+      // Onboarding hero: map by kind (plain target shares the host's id).
+      if (heroBooting) {
+        heroStep = p.kind === "host" ? "host" : "target";
+        heroPhase = p.phase;
+        heroBytes = p.bytes;
+        const size = sizeOf(p.id);
+        heroPct =
+          p.phase === "downloading"
+            ? size
+              ? Math.min(100, (p.bytes / size) * 100)
+              : null
+            : 100; // verify/extract/place run after the download completes
+      }
     });
     // The engine bundle also downloads automatically before the first toolchain
     // install; reflect that progress and pick up the version when it finishes.
@@ -229,6 +509,12 @@
       } else {
         enginePrep = p.bytes;
       }
+      if (heroBooting && p.phase !== "done") {
+        heroStep = "engine";
+        heroPhase = "downloading";
+        heroBytes = p.bytes;
+        heroPct = null; // engine bundle has no known size upfront
+      }
     });
     return () => {
       un.then((f) => f());
@@ -237,6 +523,59 @@
   });
 </script>
 
+{#if !bootChecked}
+  <div class="boot-splash">
+    <img class="boot-logo" src={logoUrl} alt="Xenolith" />
+    <div class="boot-spinner"></div>
+  </div>
+{:else if showHero}
+  <div class="hero">
+    <div class="hero-card">
+      <img class="hero-logo" src={logoUrl} alt="Xenolith" />
+      <h1 class="hero-title">Xenolith</h1>
+      <p class="hero-sub">{S["hero-sub"]}</p>
+
+      {#if heroDone}
+        <div class="hero-done">✓ {S["hero-done"]}</div>
+        <button class="btn primary hero-btn" onclick={goCreateProject}>
+          {S["hero-create"]} <span class="harrow">→</span>
+        </button>
+      {:else if heroError}
+        <p class="hero-err">⚠ {heroError}</p>
+        <button class="btn primary hero-btn" onclick={startBootstrap}>↻ {S["hero-retry"]}</button>
+        <button class="hero-link" onclick={() => { heroPreview = false; manualMode = true; }}>
+          {S["hero-manual"]}
+        </button>
+      {:else if heroBooting}
+        <div class="hero-steps">
+          {#each [["engine", S["hero-step-engine"]], ["host", S["hero-step-host"]], ["target", S["hero-step-target"]]] as step (step[0])}
+            <div class="hero-step" class:active={heroStep === step[0]} class:done={stepDone(step[0])}>
+              <span class="hdot"></span><span class="hlabel">{step[1]}</span>
+              {#if heroStep === step[0]}
+                <span class="hbytes">
+                  {S["phase-" + heroPhase] ?? heroPhase}{#if heroPhase === "downloading"} · {heroPct != null ? Math.round(heroPct) + "%" : fmtBytes(heroBytes)}{/if}
+                </span>
+              {/if}
+            </div>
+          {/each}
+        </div>
+        <div class="hero-bar">
+          {#if heroPct != null}
+            <div class="hero-fill det" style="width:{heroPct}%"></div>
+          {:else}
+            <div class="hero-fill"></div>
+          {/if}
+        </div>
+      {:else}
+        <button class="btn primary hero-btn" onclick={startBootstrap}>⚡ {S["install-all"]}</button>
+        <p class="hero-note">{S["install-all-hint"]}</p>
+        <button class="hero-link" onclick={() => { heroPreview = false; manualMode = true; }}>
+          {S["hero-manual"]}
+        </button>
+      {/if}
+    </div>
+  </div>
+{:else}
 <div class="shell">
   <header>
     <h1>Xenolith Installer</h1>
@@ -276,6 +615,23 @@
           <button class="settings-item" onclick={() => { settingsOpen = false; openWorkingDir(); }}>
             📂 {S["open-working-dir"]}
           </button>
+          <button class="settings-item" onclick={openStorage}>
+            💾 {S["storage-title"]}
+          </button>
+          <button class="settings-item" onclick={openSettings}>
+            ⚙️ {S["settings-title"]}
+          </button>
+          <button class="settings-item" onclick={openDoctor}>
+            🩺 {S["doctor-title"]}
+          </button>
+          <button class="settings-item" onclick={copyReport}>
+            📋 {S["report-copy"]}
+          </button>
+          <!-- Onboarding preview — kept for later, hidden from the gear menu for now.
+          <button class="settings-item" onclick={() => { settingsOpen = false; heroPreview = true; }}>
+            ✨ {S["hero-preview"]}
+          </button>
+          -->
         </div>
       {/if}
     </div>
@@ -295,7 +651,7 @@
   {/if}
 
   {#if tab === "projects"}
-    <main><Projects {S} goToPackages={() => (tab = "packages")} /></main>
+    <main><Projects {S} {createSignal} goToPackages={() => (tab = "packages")} /></main>
   {:else}
   <main>
     {#if loading}
@@ -350,6 +706,13 @@
                     </div>
                   {:else}
                     <span class="badge {row.status.status}">{statusText(row)}</span>
+                    {#if installed}
+                      <button class="repair" title={S["action-repair"]} onclick={() => repair(row)} disabled={busy} aria-label={S["action-repair"]}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" />
+                        </svg>
+                      </button>
+                    {/if}
                   {/if}
                 </span>
               </div>
@@ -362,6 +725,9 @@
 
   <footer class="glass">
     <button class="btn ghost" onclick={refresh} disabled={loading || busy}>{S["action-refresh"]}</button>
+    <button class="btn ghost" onclick={installEverything} disabled={busy || loading} title={S["install-all-hint"]}>
+      ⚡ {S["install-all"]}
+    </button>
     <button class="btn primary" onclick={installSelected} disabled={!selectedCount || busy}>
       {busy ? S["action-installing"] : `${S["action-install"]} (${selectedCount})`}
     </button>
@@ -381,10 +747,132 @@
       </div>
     </div>
   {/if}
+
+  {#if storageOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="overlay" onclick={() => (storageOpen = false)}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="dialog storage" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+        <div class="storage-head">
+          <h3>💾 {S["storage-title"]}</h3>
+          {#if storage}<span class="muted">{S["storage-total"]}: {fmtBytes(storage.total)}</span>{/if}
+        </div>
+        {#if storageLoading}
+          <p class="muted">{S["loading"]}</p>
+        {:else if storage}
+          {#each [{ k: "engines", label: S["storage-engines"], prune: true }, { k: "hosts", label: S["storage-hosts"], prune: false }, { k: "targets", label: S["storage-targets"], prune: false }] as grp (grp.k)}
+            {@const items = storage[grp.k as "engines" | "hosts" | "targets"]}
+            {#if items.length}
+              <div class="storage-group">{grp.label}</div>
+              {#each items as it (it.id)}
+                <div class="storage-row">
+                  <span class="sid">{it.id}</span>
+                  <span class="sbytes">{fmtBytes(it.bytes)}</span>
+                  {#if grp.prune}
+                    <button class="btn ghost danger sm" onclick={() => pruneEngine(it.id)}>{S["action-delete"]}</button>
+                  {:else}
+                    <span class="sgap"></span>
+                  {/if}
+                </div>
+              {/each}
+            {/if}
+          {/each}
+        {/if}
+        <div class="dialog-actions">
+          <button class="btn ghost" onclick={() => (storageOpen = false)}>{S["action-cancel"]}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if settingsModal && appSettings}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="overlay" onclick={() => (settingsModal = false)}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="dialog storage" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+        <div class="storage-head"><h3>⚙️ {S["settings-title"]}</h3></div>
+
+        <div class="set-row">
+          <span class="set-label">{S["settings-language"]}</span>
+          <div class="seg">
+            <button class="seg-btn" class:on={appSettings.language == null} onclick={() => chooseLanguage(null)}>{S["settings-auto"]}</button>
+            <button class="seg-btn" class:on={appSettings.language === "en"} onclick={() => chooseLanguage("en")}>English</button>
+            <button class="seg-btn" class:on={appSettings.language === "ru"} onclick={() => chooseLanguage("ru")}>Русский</button>
+            <button class="seg-btn" class:on={appSettings.language === "zh"} onclick={() => chooseLanguage("zh")}>中文</button>
+          </div>
+        </div>
+
+        <div class="set-row">
+          <span class="set-label">{S["settings-jobs"]}</span>
+          <div class="set-control">
+            <input
+              class="jobs-input"
+              type="number"
+              min="1"
+              placeholder={`${S["settings-auto"]} (${appSettings.autoJobs})`}
+              bind:value={jobsInput}
+              onchange={applyJobs}
+            />
+          </div>
+        </div>
+
+        <div class="set-row col">
+          <span class="set-label">{S["settings-datadir"]}</span>
+          <code class="datadir">{appSettings.dataDir}</code>
+          <div class="set-control">
+            <button class="btn ghost sm" onclick={chooseDataDir}>{S["project-choose"]}</button>
+            {#if appSettings.dataDirOverride}
+              <button class="btn ghost sm" onclick={resetDataDir}>{S["settings-reset"]}</button>
+            {/if}
+          </div>
+          <span class="muted set-note">{S["settings-restart"]}</span>
+        </div>
+
+        <div class="dialog-actions">
+          <button class="btn primary" onclick={() => (settingsModal = false)}>{S["action-cancel"]}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if doctorModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="overlay" onclick={() => (doctorModal = false)}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="dialog storage" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+        <div class="storage-head"><h3>🩺 {S["doctor-title"]}</h3></div>
+        {#if doctorLoading}
+          <p class="muted">{S["loading"]}</p>
+        {:else}
+          {#each doctorChecks as c (c.name)}
+            <div class="doc-row">
+              <span class="doc-mark {c.ok ? 'ok' : 'bad'}">{c.ok ? "✓" : "✗"}</span>
+              <span class="doc-name">{c.name}</span>
+              <span class="doc-detail">{c.detail}</span>
+            </div>
+          {/each}
+        {/if}
+        <div class="dialog-actions">
+          <button class="btn ghost" onclick={openDoctor}>{S["action-refresh"]}</button>
+          <button class="btn primary" onclick={() => (doctorModal = false)}>{S["action-cancel"]}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if toast}<div class="toast">{toast}</div>{/if}
 </div>
+{/if}
 
 <svelte:window
-  onkeydown={(e) => pending && e.key === "Escape" && (pending = null)}
+  onkeydown={(e) => {
+    if (e.key === "Escape") {
+      pending = null;
+      storageOpen = false;
+      settingsModal = false;
+      doctorModal = false;
+    }
+  }}
   onclick={() => (settingsOpen = false)}
 />
 
@@ -473,6 +961,344 @@
   }
   .settings-item:hover {
     background: rgba(252, 180, 0, 0.1);
+  }
+  .repair {
+    display: inline-flex;
+    vertical-align: middle;
+    margin-left: 8px;
+    background: transparent;
+    border: none;
+    color: var(--xeno-text-secondary);
+    padding: 2px;
+    border-radius: 4px;
+  }
+  .repair:hover:not(:disabled) {
+    color: var(--xeno-accent);
+  }
+  .repair:disabled {
+    opacity: 0.4;
+  }
+  .storage {
+    width: min(560px, 92vw);
+    text-align: left;
+  }
+  .storage-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .storage-head h3 {
+    margin: 0;
+    font-size: 15px;
+  }
+  .storage-group {
+    margin: 12px 0 4px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--xeno-text-secondary);
+  }
+  .storage-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 12px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--xeno-border-muted);
+  }
+  .sid {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sbytes {
+    color: var(--xeno-text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .sgap {
+    width: 0;
+  }
+  .btn.sm {
+    padding: 3px 8px;
+    font-size: 12px;
+  }
+  .set-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--xeno-border-muted);
+  }
+  .set-row.col {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .set-label {
+    font-size: 13px;
+    color: var(--xeno-text-secondary);
+  }
+  .set-control {
+    display: flex;
+    gap: 8px;
+  }
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--xeno-border-muted);
+    border-radius: var(--xeno-radius-control);
+    overflow: hidden;
+  }
+  .seg-btn {
+    background: transparent;
+    border: none;
+    color: var(--xeno-text-secondary);
+    font-size: 13px;
+    padding: 6px 12px;
+  }
+  .seg-btn:not(:last-child) {
+    border-right: 1px solid var(--xeno-border-muted);
+  }
+  .seg-btn.on {
+    background: var(--xeno-accent);
+    color: var(--xeno-on-accent);
+    font-weight: 600;
+  }
+  .jobs-input {
+    width: 130px;
+    background: var(--xeno-bg);
+    border: 1px solid var(--xeno-border);
+    border-radius: var(--xeno-radius-control);
+    color: var(--xeno-text);
+    padding: 6px 8px;
+    font-size: 13px;
+  }
+  .datadir {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px;
+    background: var(--xeno-bg);
+    border: 1px solid var(--xeno-border-muted);
+    border-radius: var(--xeno-radius-control);
+    padding: 6px 8px;
+    overflow-wrap: anywhere;
+  }
+  .set-note {
+    font-size: 11px;
+  }
+  /* ---- onboarding hero ---- */
+  .hero {
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background:
+      radial-gradient(900px 500px at 50% -10%, rgba(252, 180, 0, 0.12), transparent 60%),
+      var(--xeno-bg-page);
+  }
+  .boot-splash {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    background: var(--xeno-bg-page);
+  }
+  .boot-logo {
+    width: 84px;
+    height: 84px;
+    object-fit: contain;
+    filter: drop-shadow(0 8px 28px rgba(252, 180, 0, 0.25));
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  .boot-spinner {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 3px solid var(--xeno-border);
+    border-top-color: var(--xeno-accent, #fcb400);
+    animation: spin 0.7s linear infinite;
+  }
+  .hero-card {
+    width: min(440px, 92vw);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 10px;
+  }
+  .hero-logo {
+    width: 112px;
+    height: 112px;
+    object-fit: contain;
+    filter: drop-shadow(0 8px 28px rgba(252, 180, 0, 0.25));
+  }
+  .hero-title {
+    margin: 4px 0 0;
+    font-size: 34px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+  }
+  .hero-sub {
+    margin: 0 0 12px;
+    color: var(--xeno-text-secondary);
+    font-size: 14px;
+    max-width: 340px;
+  }
+  .hero-btn {
+    font-size: 16px;
+    font-weight: 600;
+    padding: 12px 28px;
+    border-radius: 10px;
+  }
+  .hero-note {
+    margin: 2px 0 0;
+    font-size: 12px;
+    color: var(--xeno-text-secondary);
+  }
+  .hero-link {
+    margin-top: 10px;
+    background: transparent;
+    border: none;
+    color: var(--xeno-text-secondary);
+    text-decoration: underline;
+    font-size: 13px;
+  }
+  .hero-link:hover {
+    color: var(--xeno-accent);
+  }
+  .hero-steps {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 8px 0 4px;
+  }
+  .hero-step {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--xeno-text-secondary);
+    font-size: 14px;
+  }
+  .hero-step .hdot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid var(--xeno-border-muted);
+    flex: 0 0 auto;
+  }
+  .hero-step.active {
+    color: var(--xeno-text);
+  }
+  .hero-step.active .hdot {
+    border-color: var(--xeno-accent);
+    background: var(--xeno-accent);
+    animation: pulse 1s ease-in-out infinite;
+  }
+  .hero-step.done .hdot {
+    border-color: #6bdc8f;
+    background: #6bdc8f;
+  }
+  .hbytes {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    color: var(--xeno-text-secondary);
+  }
+  .hero-bar {
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--xeno-surface-3);
+    overflow: hidden;
+  }
+  .hero-fill {
+    width: 40%;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--xeno-accent);
+    animation: indet 1.1s ease-in-out infinite;
+  }
+  .hero-fill.det {
+    animation: none;
+    transition: width 0.2s ease;
+  }
+  .hero-done {
+    font-size: 18px;
+    font-weight: 600;
+    color: #6bdc8f;
+    padding: 12px 12px 6px;
+  }
+  .harrow {
+    display: inline-block;
+    transition: transform 0.15s ease;
+  }
+  .hero-btn:hover .harrow {
+    transform: translateX(3px);
+  }
+  .hero-err {
+    color: #ff6b6b;
+    font-size: 13px;
+    margin: 0 0 12px;
+    max-width: 360px;
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.45;
+    }
+  }
+  @keyframes indet {
+    0% {
+      transform: translateX(-110%);
+    }
+    100% {
+      transform: translateX(360%);
+    }
+  }
+  /* ---- doctor ---- */
+  .doc-row {
+    display: grid;
+    grid-template-columns: 18px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--xeno-border-muted);
+    font-size: 13px;
+  }
+  .doc-mark.ok {
+    color: #6bdc8f;
+  }
+  .doc-mark.bad {
+    color: #ff6b6b;
+  }
+  .doc-detail {
+    color: var(--xeno-text-secondary);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+  }
+  /* ---- toast ---- */
+  .toast {
+    position: fixed;
+    bottom: 28px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--xeno-surface-3);
+    border: 1px solid var(--xeno-border-muted);
+    color: var(--xeno-text);
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-size: 13px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    z-index: 100;
   }
   .native {
     color: var(--xeno-accent);

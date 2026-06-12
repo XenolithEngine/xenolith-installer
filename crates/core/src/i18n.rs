@@ -9,16 +9,18 @@ use fluent::{FluentArgs, FluentBundle, FluentResource, FluentValue};
 use unic_langid::LanguageIdentifier;
 
 /// Languages shipped with the installer. The first is the fallback.
-pub const AVAILABLE: &[&str] = &["en", "ru"];
+pub const AVAILABLE: &[&str] = &["en", "ru", "zh"];
 pub const FALLBACK: &str = "en";
 
 const EN_FTL: &str = include_str!("../locales/en.ftl");
 const RU_FTL: &str = include_str!("../locales/ru.ftl");
+const ZH_FTL: &str = include_str!("../locales/zh.ftl");
 
 fn catalogue(lang: &str) -> Option<&'static str> {
     match lang {
         "en" => Some(EN_FTL),
         "ru" => Some(RU_FTL),
+        "zh" => Some(ZH_FTL),
         _ => None,
     }
 }

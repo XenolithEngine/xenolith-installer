@@ -30,6 +30,7 @@ export type InstallPhase = "downloading" | "verifying" | "extracting" | "placing
 
 export interface InstallProgress {
   id: string;
+  kind: "host" | "target";
   phase: InstallPhase;
   bytes: number;
 }
@@ -181,6 +182,57 @@ export async function openWorkingDir(): Promise<void> {
   await invoke("open_working_dir");
 }
 
+export async function openTerminal(path: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("open_terminal", { path });
+}
+
+export async function cleanProject(path: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("clean_project", { path });
+}
+
+export async function installForSystem(): Promise<void> {
+  if (!inTauri) {
+    await new Promise((r) => setTimeout(r, 600));
+    return;
+  }
+  await invoke("install_for_system");
+}
+
+export interface StorageItem {
+  id: string;
+  bytes: number;
+}
+export interface Storage {
+  engines: StorageItem[];
+  hosts: StorageItem[];
+  targets: StorageItem[];
+  total: number;
+}
+
+export async function diskUsage(): Promise<Storage> {
+  if (!inTauri) {
+    return {
+      engines: [{ id: "master", bytes: 420_000_000 }],
+      hosts: [{ id: "aarch64-apple-macosx", bytes: 310_000_000 }],
+      targets: [{ id: "aarch64-apple-macosx", bytes: 120_000_000 }],
+      total: 850_000_000,
+    };
+  }
+  return invoke<Storage>("disk_usage");
+}
+
+export async function removeEngine(reference: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("remove_engine", { reference });
+}
+
+export async function projectSize(path: string): Promise<number> {
+  if (!inTauri) return 0;
+  return invoke<number>("project_size", { path });
+}
+
 export async function buildProject(
   path: string,
   target: string,
@@ -195,6 +247,31 @@ export async function onBuildLine(cb: (line: string) => void): Promise<UnlistenF
   return listen<{ line: string }>("build://line", (e) => cb(e.payload.line));
 }
 
+export async function cancelBuild(): Promise<void> {
+  if (!inTauri) return;
+  await invoke("cancel_build");
+}
+
+export async function diagnosticsReport(): Promise<string> {
+  if (!inTauri) return "Xenolith Installer (dev) — no diagnostics in browser preview";
+  return invoke<string>("diagnostics_report");
+}
+
+export interface DoctorCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+export async function runDoctor(): Promise<DoctorCheck[]> {
+  if (!inTauri) {
+    return [
+      { name: "Engine present", ok: true, detail: "~/.local/share/xenolith" },
+      { name: "Host toolchain", ok: true, detail: "aarch64-apple-macosx" },
+    ];
+  }
+  return invoke<DoctorCheck[]>("run_doctor");
+}
+
 /// Native folder picker (Tauri dialog plugin). Returns the chosen path or null.
 export async function pickFolder(): Promise<string | null> {
   if (!inTauri) return null;
@@ -203,13 +280,53 @@ export async function pickFolder(): Promise<string | null> {
   return typeof res === "string" ? res : null;
 }
 
+// Active UI language ("en"/"ru"); empty = follow the system locale. Set from
+// the persisted setting at startup and on toggle, then passed to every lookup.
+let currentLang = "";
+export function setLang(lang: string | null) {
+  currentLang = lang ?? "";
+}
+
 export async function t(key: string, args?: Record<string, string>): Promise<string> {
   if (!inTauri) {
     let s = DEV_STRINGS[key] ?? key;
     if (args) for (const [k, v] of Object.entries(args)) s = s.replace(`{${k}}`, v);
     return s;
   }
-  return invoke<string>("translate", { key, args: args ?? null });
+  return invoke<string>("translate", { key, args: args ?? null, lang: currentLang || null });
+}
+
+export interface AppSettings {
+  language: string | null;
+  jobs: number | null;
+  autoJobs: number;
+  dataDir: string;
+  defaultDataDir: string;
+  dataDirOverride: string | null;
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  if (!inTauri) {
+    return {
+      language: null,
+      jobs: null,
+      autoJobs: 8,
+      dataDir: "~/.local/share/xenolith",
+      defaultDataDir: "~/.local/share/xenolith",
+      dataDirOverride: null,
+    };
+  }
+  return invoke<AppSettings>("get_settings");
+}
+
+export async function setSettings(language: string | null, jobs: number | null): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_settings", { language, jobs });
+}
+
+export async function setDataDir(path: string | null): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_data_dir", { path });
 }
 
 // ---- dev fallbacks ----

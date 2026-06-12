@@ -246,12 +246,25 @@ mod tests {
 
     #[test]
     fn detect_reports_emulation_fallback() {
+        // Windows-on-ARM runs the x86_64 host under emulation.
+        let t = MockTransport::new();
+        let v = AcceptAll;
+        let home = tempfile::tempdir().unwrap();
+        let ctx = ctx_with(&t, &v, home.path(), "aarch64", "windows");
+        let out = run(&Command::Detect, &ctx).unwrap();
+        assert!(out.contains("x86_64-pc-windows-msvc"), "got: {out}");
+    }
+
+    #[test]
+    fn detect_intel_mac_is_native_host() {
+        // Intel Macs have their own x86_64 host — no arm fallback.
         let t = MockTransport::new();
         let v = AcceptAll;
         let home = tempfile::tempdir().unwrap();
         let ctx = ctx_with(&t, &v, home.path(), "x86_64", "macos");
         let out = run(&Command::Detect, &ctx).unwrap();
-        assert!(out.contains("aarch64-apple-macosx"), "got: {out}");
+        assert!(out.contains("x86_64-apple-macosx"), "got: {out}");
+        assert!(!out.contains("aarch64"), "got: {out}");
     }
 
     #[test]

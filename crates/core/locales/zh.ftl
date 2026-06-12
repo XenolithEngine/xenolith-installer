@@ -1,0 +1,92 @@
+# 简体中文目录。标签与 UI Kit 对应。
+app-title = Xenolith 安装器
+
+group-hosts = 开发工具
+group-targets = 运行平台
+
+status-installed = 已安装
+status-not-installed = 未安装
+status-update-available = 有可用更新：{ $version }
+
+action-install = 安装
+action-cancel = 取消
+action-open = 打开
+action-assign = 指定
+action-refresh = 刷新
+action-installing = 正在安装…
+action-show-details = 显示软件包详情
+action-hide-obsolete = 隐藏过时版本
+action-delete = 删除
+confirm-delete = 删除 { $name }？将移除其已安装的文件。
+
+phase-downloading = 正在下载
+open-working-dir = 打开工作目录
+phase-verifying = 正在校验
+phase-extracting = 正在解压
+phase-placing = 正在完成
+
+loading = 正在加载目录…
+skipped-unsigned = 已跳过 { $count } 个未签名的文件
+
+install-all = 为本系统安装全部
+install-all-hint = 引擎 + 主机工具链 + 本机目标
+action-repair = 修复（重新下载）
+storage-title = 磁盘占用
+storage-engines = 引擎
+storage-hosts = 主机工具链
+storage-targets = 目标
+storage-total = 合计
+settings-title = 设置
+settings-language = 语言
+settings-auto = 自动
+settings-jobs = 并行构建任务数
+settings-datadir = 数据目录
+settings-reset = 重置
+settings-restart = 更改数据目录将在重启后生效。
+hero-sub = 跨平台引擎 SDK。一键完成设置。
+hero-retry = 重试
+hero-create = 创建你的第一个项目
+hero-done = 全部就绪！
+hero-step-engine = 引擎
+hero-step-host = 主机工具链
+hero-step-target = 目标
+hero-manual = 详细设置
+hero-preview = 引导页（预览）
+doctor-title = 检查安装
+report-copy = 复制诊断信息
+report-copied = 诊断信息已复制到剪贴板
+datadir-no-space = 路径不能包含空格
+engine-label = 引擎
+engine-missing = 引擎 SDK 尚未安装
+engine-prepare = 准备 SDK
+engine-preparing = 正在准备 SDK…
+
+nav-packages = 软件包
+nav-projects = 项目
+project-new = 新建项目
+project-name = 项目名称
+project-name-rule = 字母、数字、- 和 _（不含空格）
+project-folder = 位置
+project-location = 位置（父文件夹）
+project-choose = 选择…
+project-engine = 引擎版本
+project-target = 构建目标
+run-host-only = 仅当目标与主机一致时才能运行
+project-create = 创建
+project-build = 构建
+project-run = 运行
+project-open = 打开方式
+project-terminal = 终端
+project-clean = 清理
+project-rebuild = 重新构建
+project-remove = 移除
+projects-empty = 还没有项目
+engine-required = 请先安装引擎 SDK 和主机工具链
+create-requirements = 创建项目前，请先安装引擎、主机工具链和一个目标（在“软件包”中）
+go-packages = 前往软件包
+build-building = 正在构建…
+
+col-name = 名称
+col-size = 大小
+col-version = 版本
+col-status = 状态

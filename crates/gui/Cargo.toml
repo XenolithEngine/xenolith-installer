@@ -20,6 +20,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
 log = "0.4"
+directories = "5"
 serde.workspace = true
 serde_json.workspace = true
 time = { version = "0.3", features = ["formatting"] }

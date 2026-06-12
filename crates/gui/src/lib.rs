@@ -2,7 +2,7 @@
 //! the heavy FTP/verify/extract work runs on a blocking thread and progress is
 //! pushed to the webview as events.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -49,6 +49,9 @@ fn install_guard() -> std::sync::MutexGuard<'static, ()> {
     INSTALL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// PID of the in-flight build/run child (0 = none), so `cancel_build` can stop it.
+static BUILD_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// `<config>/engine.json` — records the installed engine/runtime version.
 fn engine_info_path(layout: &Layout) -> std::path::PathBuf {
     layout.config.join("engine.json")
@@ -72,8 +75,16 @@ struct CatalogDto {
 #[serde(rename_all = "camelCase")]
 struct ProgressDto {
     id: String,
+    kind: &'static str,
     phase: &'static str,
     bytes: u64,
+}
+
+fn kind_str(k: Kind) -> &'static str {
+    match k {
+        Kind::Host => "host",
+        Kind::Target => "target",
+    }
 }
 
 /// The installed engine/runtime version, for display.
@@ -108,7 +119,56 @@ fn phase_str(p: Phase) -> &'static str {
 }
 
 fn layout() -> Result<Layout, String> {
-    Layout::resolve_from_env(None).map_err(|e| e.to_string())
+    // The data-root override lives OUTSIDE the data root (a bootstrap file in the
+    // OS config dir), since it decides where the data root is.
+    let prefix = data_root_override();
+    Layout::resolve(
+        prefix.as_deref(),
+        std::env::var("XENOLITH_HOME").ok().as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Bootstrap file (in the OS config dir, independent of the data root) holding a
+/// user-chosen data-root override.
+fn data_root_bootstrap() -> Option<std::path::PathBuf> {
+    directories::BaseDirs::new()
+        .map(|b| b.config_dir().join("xenolith-installer").join("data-root"))
+}
+
+fn data_root_override() -> Option<std::path::PathBuf> {
+    let p = std::fs::read_to_string(data_root_bootstrap()?).ok()?;
+    let trimmed = p.trim();
+    (!trimmed.is_empty()).then(|| std::path::PathBuf::from(trimmed))
+}
+
+/// Persisted UI/build settings, stored at `<config>/settings.json` (the data-root
+/// override is NOT here — see `data_root_bootstrap`).
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Settings {
+    /// Forced UI language ("en"/"ru"); None = follow the system locale.
+    language: Option<String>,
+    /// Forced `make -j` job count; None = one per logical CPU.
+    jobs: Option<u32>,
+}
+
+fn settings_path(layout: &Layout) -> std::path::PathBuf {
+    layout.config.join("settings.json")
+}
+
+fn load_settings() -> Settings {
+    layout()
+        .ok()
+        .and_then(|l| std::fs::read(settings_path(&l)).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn auto_jobs() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4)
 }
 
 #[tauri::command]
@@ -123,8 +183,11 @@ fn detect_host() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn translate(key: String, args: Option<HashMap<String, String>>) -> String {
-    let i18n = I18n::from_env();
+fn translate(key: String, args: Option<HashMap<String, String>>, lang: Option<String>) -> String {
+    let i18n = match lang.as_deref() {
+        Some(l) if !l.is_empty() => I18n::new(l),
+        _ => I18n::from_env(),
+    };
     match args {
         Some(m) if !m.is_empty() => {
             let pairs: Vec<(&str, &str)> =
@@ -273,20 +336,11 @@ fn install_blocking(app: &AppHandle, id: &str, kind: Kind) -> Result<(), String>
         ensure_engine(app, &layout, false)?;
     }
     let transport = FtpTransport::new(SERVER);
-
     // Establish the trusted signing key (fetched from a keyserver, pinned).
     let asc = key_source::fetch_release_key().map_err(|e| e.to_string())?;
     let verifier = PgpVerifier::release(&asc).map_err(|e| e.to_string())?;
-
     let (manifest, _) = manifest::fetch_manifest(&transport, REMOTE_BASE, RELEASE, LIST_ATTEMPTS)
         .map_err(|e| e.to_string())?;
-
-    // Resolve the exact component: a triple can exist as both host and target.
-    let component = manifest
-        .find_kind(id, kind)
-        .ok_or_else(|| format!("component not found: {id} ({kind:?})"))?
-        .clone();
-
     let installer = Installer {
         transport: &transport,
         verifier: &verifier,
@@ -294,13 +348,33 @@ fn install_blocking(app: &AppHandle, id: &str, kind: Kind) -> Result<(), String>
         remote_base: REMOTE_BASE.into(),
         release: RELEASE.into(),
     };
+    install_one(app, &installer, &manifest, &layout, id, kind)
+}
+
+/// Download + verify + extract + place ONE component using an already-built
+/// installer + manifest. Factored out so a multi-component install (the one-click
+/// bootstrap) fetches the key/manifest ONCE instead of per component — otherwise
+/// the slow per-component FTP round-trips leave the UI stalled between steps.
+fn install_one(
+    app: &AppHandle,
+    installer: &Installer,
+    manifest: &manifest::Manifest,
+    layout: &Layout,
+    id: &str,
+    kind: Kind,
+) -> Result<(), String> {
+    // A triple can exist as both host and target — resolve the exact one.
+    let component = manifest
+        .find_kind(id, kind)
+        .ok_or_else(|| format!("component not found: {id} ({kind:?})"))?
+        .clone();
     let now = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_default();
-
     // Throttle download events to ~one per whole percent so the UI bar is smooth
     // without flooding the bridge (the transport reports every 64 KiB chunk).
     let size = component.size.max(1);
+    let kstr = kind_str(kind);
     let mut last_pct = u64::MAX;
     let record = installer
         .install_component(&component, &now, &mut |phase, bytes| {
@@ -317,6 +391,7 @@ fn install_blocking(app: &AppHandle, id: &str, kind: Kind) -> Result<(), String>
                     "install://progress",
                     ProgressDto {
                         id: id.to_string(),
+                        kind: kstr,
                         phase: phase_str(phase),
                         bytes,
                     },
@@ -333,10 +408,379 @@ fn install_blocking(app: &AppHandle, id: &str, kind: Kind) -> Result<(), String>
     let mut state = InstalledState::load(&path).map_err(|e| e.to_string())?;
     state.upsert(record);
     state.save(&path).map_err(|e| e.to_string())?;
-
-    // Link the freshly-installed toolchain into every installed engine.
-    install::relink_all_engines(&layout).map_err(|e| e.to_string())?;
+    install::relink_all_engines(layout).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// One-click bootstrap: engine + the native host toolchain + the native targets
+/// (plain and `+sprt`). Fetches the key/manifest ONCE and reuses them across all
+/// components so the UI never stalls between steps on redundant FTP round-trips.
+#[tauri::command]
+async fn install_for_system(app: AppHandle) -> Result<(), String> {
+    log::info!("install_for_system");
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = native_host()?;
+        let layout = layout()?;
+        {
+            let _g = install_guard();
+            ensure_engine(&app, &layout, false)?;
+        }
+        let transport = FtpTransport::new(SERVER);
+        let asc = key_source::fetch_release_key().map_err(|e| e.to_string())?;
+        let verifier = PgpVerifier::release(&asc).map_err(|e| e.to_string())?;
+        let (manifest, _) =
+            manifest::fetch_manifest(&transport, REMOTE_BASE, RELEASE, LIST_ATTEMPTS)
+                .map_err(|e| e.to_string())?;
+        let installer = Installer {
+            transport: &transport,
+            verifier: &verifier,
+            layout: &layout,
+            remote_base: REMOTE_BASE.into(),
+            release: RELEASE.into(),
+        };
+
+        install_one(&app, &installer, &manifest, &layout, &host, Kind::Host)
+            .inspect_err(|e| log::error!("install_for_system host failed: {e}"))?;
+
+        // Plain native target (current default) + its self-contained `+sprt` variant.
+        let mut targets = Vec::new();
+        if manifest.find_kind(&host, Kind::Target).is_some() {
+            targets.push(host.clone());
+        }
+        let sprt = format!("{host}+sprt");
+        if manifest.find_kind(&sprt, Kind::Target).is_some() {
+            targets.push(sprt);
+        }
+        for t in targets {
+            install_one(&app, &installer, &manifest, &layout, &t, Kind::Target)
+                .inspect_err(|e| log::error!("install_for_system target {t} failed: {e}"))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------- storage / disk usage ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageItem {
+    id: String,
+    bytes: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageDto {
+    engines: Vec<StorageItem>,
+    hosts: Vec<StorageItem>,
+    targets: Vec<StorageItem>,
+    total: u64,
+}
+
+/// Recursively sum the byte size of a directory (best-effort; skips errors).
+/// Does NOT follow symlinks — engines symlink the toolchain store into themselves,
+/// so following them would double-count the toolchains against each engine.
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0;
+    if let Ok(rd) = std::fs::read_dir(path) {
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            } else if ft.is_dir() {
+                total += dir_size(&entry.path());
+            } else {
+                total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    total
+}
+
+fn list_sizes(dir: &std::path::Path) -> Vec<StorageItem> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            if entry.path().is_dir() {
+                out.push(StorageItem {
+                    id: entry.file_name().to_string_lossy().into_owned(),
+                    bytes: dir_size(&entry.path()),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    out
+}
+
+#[tauri::command]
+async fn disk_usage() -> Result<StorageDto, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let layout = layout()?;
+        let store = layout.toolchains_store_dir();
+        let engines = list_sizes(&layout.engines_dir());
+        let hosts = list_sizes(&store.join("hosts"));
+        let targets = list_sizes(&store.join("targets"));
+        let total = engines
+            .iter()
+            .chain(&hosts)
+            .chain(&targets)
+            .map(|i| i.bytes)
+            .sum();
+        Ok(StorageDto {
+            engines,
+            hosts,
+            targets,
+            total,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Delete an installed engine version directory.
+#[tauri::command]
+fn remove_engine(reference: String) -> Result<(), String> {
+    log::info!("remove_engine {reference}");
+    let layout = layout()?;
+    let dir = layout.engine_dir(&reference);
+    if dir.is_dir() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// On-disk size of a project directory (mostly its `stappler-build/` output).
+#[tauri::command]
+async fn project_size(path: String) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || dir_size(std::path::Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------- settings ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsDto {
+    language: Option<String>,
+    jobs: Option<u32>,
+    auto_jobs: u32,
+    data_dir: String,
+    default_data_dir: String,
+    data_dir_override: Option<String>,
+}
+
+fn root_of(layout: &Layout) -> String {
+    layout
+        .config
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_settings() -> Result<SettingsDto, String> {
+    let s = load_settings();
+    let data_dir = root_of(&layout()?);
+    let default_data_dir = Layout::system()
+        .ok()
+        .map(|l| root_of(&l))
+        .unwrap_or_default();
+    Ok(SettingsDto {
+        language: s.language,
+        jobs: s.jobs,
+        auto_jobs: auto_jobs(),
+        data_dir,
+        default_data_dir,
+        data_dir_override: data_root_override().map(|p| p.display().to_string()),
+    })
+}
+
+#[tauri::command]
+fn set_settings(language: Option<String>, jobs: Option<u32>) -> Result<(), String> {
+    let s = Settings {
+        language: language.filter(|l| !l.is_empty()),
+        jobs: jobs.filter(|n| *n >= 1),
+    };
+    log::info!("set_settings language={:?} jobs={:?}", s.language, s.jobs);
+    let layout = layout()?;
+    let path = settings_path(&layout);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&s).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Persist (or clear) the data-root override. Takes effect on the next launch.
+#[tauri::command]
+fn set_data_dir(path: Option<String>) -> Result<(), String> {
+    let boot = data_root_bootstrap().ok_or("no OS config directory")?;
+    if let Some(parent) = boot.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    match path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            // GNU make splits STAPPLER_ROOT on whitespace — a space breaks builds.
+            if p.contains(char::is_whitespace) {
+                return Err("data directory must not contain spaces".into());
+            }
+            log::info!("set_data_dir -> {p}");
+            std::fs::write(&boot, p).map_err(|e| e.to_string())?;
+        }
+        None => {
+            log::info!("set_data_dir -> default (cleared)");
+            let _ = std::fs::remove_file(&boot);
+        }
+    }
+    Ok(())
+}
+
+// ---------- diagnostics / doctor ----------
+
+fn ids_of(dir: &std::path::Path) -> String {
+    let ids: Vec<String> = list_sizes(dir).into_iter().map(|i| i.id).collect();
+    if ids.is_empty() {
+        "—".into()
+    } else {
+        ids.join(", ")
+    }
+}
+
+/// A plain-text diagnostics dump (system + install state + log tail) for support.
+#[tauri::command]
+fn diagnostics_report() -> Result<String, String> {
+    use std::fmt::Write;
+    let layout = layout()?;
+    let store = layout.toolchains_store_dir();
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "Xenolith Installer {} — {} {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    let _ = writeln!(s, "Data dir : {}", root_of(&layout));
+    let _ = writeln!(
+        s,
+        "Engine   : {}",
+        read_engine_info(&layout)
+            .map(|e| format!("{} ({})", e.reference, e.short()))
+            .unwrap_or_else(|| "not installed".into())
+    );
+    let _ = writeln!(
+        s,
+        "Host     : {}",
+        native_host().unwrap_or_else(|_| "unknown".into())
+    );
+    let _ = writeln!(s, "Hosts    : {}", ids_of(&store.join("hosts")));
+    let _ = writeln!(s, "Targets  : {}", ids_of(&store.join("targets")));
+    let set = load_settings();
+    let _ = writeln!(s, "Settings : lang={:?} jobs={:?}", set.language, set.jobs);
+    let _ = writeln!(s, "\n--- installer.log (last 150 lines) ---");
+    if let Ok(content) = std::fs::read_to_string(log_dir().join("installer.log")) {
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(150);
+        s.push_str(&lines[start..].join("\n"));
+    }
+    Ok(s)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorCheck {
+    name: String,
+    ok: bool,
+    detail: String,
+}
+
+/// Health checks over the install — catches the things that silently break a build.
+#[tauri::command]
+fn run_doctor() -> Result<Vec<DoctorCheck>, String> {
+    let layout = layout()?;
+    let mut out = Vec::new();
+    let mut check = |name: &str, ok: bool, detail: String| {
+        out.push(DoctorCheck {
+            name: name.into(),
+            ok,
+            detail,
+        })
+    };
+
+    let eng = layout.engine_dir(ENGINE_REF);
+    let has_make = eng.join("make").join("universal.mk").is_file();
+    check(
+        "Engine present",
+        has_make,
+        if has_make {
+            root_of(&layout)
+        } else {
+            "missing make/universal.mk — Prepare SDK".into()
+        },
+    );
+    let bn = eng.join(".build_number").is_file();
+    check(
+        "Engine build number",
+        bn,
+        if bn {
+            "ok".into()
+        } else {
+            "missing .build_number — re-prepare the engine".into()
+        },
+    );
+
+    let host = native_host().unwrap_or_default();
+    let host_bin = install::component_dir(&layout, Kind::Host, &host)
+        .join("bin")
+        .is_dir();
+    check(
+        "Host toolchain",
+        host_bin,
+        if host_bin {
+            host.clone()
+        } else {
+            format!("{host} not installed")
+        },
+    );
+
+    // The engine symlinks the toolchain store into itself; a stale link breaks
+    // "no host specification found".
+    let link = eng
+        .join("toolchains")
+        .join("hosts")
+        .join(&host)
+        .join("host.mk")
+        .is_file();
+    check(
+        "Engine→toolchain link",
+        link || !host_bin,
+        if link {
+            "resolves".into()
+        } else {
+            "broken — a build self-heals it".into()
+        },
+    );
+
+    for tool in ["git", "make"] {
+        let ok = has_command(tool);
+        check(
+            &format!("`{tool}` available"),
+            ok,
+            if ok {
+                "on PATH".into()
+            } else {
+                "not found".into()
+            },
+        );
+    }
+    Ok(out)
 }
 
 // ---------- projects ----------
@@ -638,6 +1082,46 @@ fn open_working_dir() -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Resolve a registered project plus its engine root and host toolchain `bin`.
+fn project_paths(path: &str) -> Result<(Project, std::path::PathBuf, std::path::PathBuf), String> {
+    let layout = layout()?;
+    let project = ProjectRegistry::load(&projects_path(&layout))
+        .map_err(|e| e.to_string())?
+        .projects
+        .iter()
+        .find(|p| p.path.to_str() == Some(path))
+        .cloned()
+        .ok_or_else(|| "project not found".to_string())?;
+    let engine_root = layout.engine_dir(&project.engine);
+    let host = native_host()?;
+    let host_bin = install::component_dir(&layout, Kind::Host, &host).join("bin");
+    Ok((project, engine_root, host_bin))
+}
+
+/// Open a terminal in the project dir with `STAPPLER_ROOT` and the toolchain on
+/// PATH already set — so `make` "just works" for hand-driving the build.
+#[tauri::command]
+fn open_terminal(path: String) -> Result<(), String> {
+    log::info!("open_terminal path={path}");
+    let (_p, engine_root, host_bin) = project_paths(&path)?;
+    let root = projects::make_path(&engine_root);
+    let bin = host_bin.display().to_string();
+    let mut cmd = terminal_cmd(&path, &root, &bin);
+    clean_external_env(&mut cmd);
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Delete a project's `stappler-build/` output directory (clean).
+#[tauri::command]
+fn clean_project(path: String) -> Result<(), String> {
+    log::info!("clean_project path={path}");
+    let build = std::path::Path::new(&path).join("stappler-build");
+    if build.is_dir() {
+        std::fs::remove_dir_all(&build).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// AppImage's runtime prepends its bundled libraries/modules to a set of
 /// environment variables. Any process we spawn (xdg-open, the file manager,
 /// editors) then loads those bundled libs and dies with `undefined symbol`
@@ -720,6 +1204,60 @@ fn file_manager_cmd(path: &str) -> std::process::Command {
     {
         let mut c = std::process::Command::new("xdg-open");
         c.arg(path);
+        c
+    }
+}
+
+/// Open an interactive terminal at `path` with `STAPPLER_ROOT=<root>` exported and
+/// `<bin>` prepended to PATH. Each OS sets the env inline in the launched shell
+/// (terminal emulators often spawn the shell via a server that drops our env).
+fn terminal_cmd(path: &str, root: &str, bin: &str) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    {
+        let q = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let inner = format!(
+            "cd '{}'; export STAPPLER_ROOT='{}'; export PATH='{}':\\\"$PATH\\\"; clear",
+            path.replace('\'', "'\\''"),
+            root.replace('\'', "'\\''"),
+            bin.replace('\'', "'\\''"),
+        );
+        let script = format!(
+            "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
+            q(&inner)
+        );
+        let mut c = std::process::Command::new("osascript");
+        c.args(["-e", &script]);
+        c
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let inner = format!(
+            "cd /d \"{path}\" && set \"STAPPLER_ROOT={root}\" && set \"PATH={bin};%PATH%\""
+        );
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", "cmd", "/K", &inner]);
+        c
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let p = path.replace('\'', "'\\''");
+        let r = root.replace('\'', "'\\''");
+        let b = bin.replace('\'', "'\\''");
+        // bash command run inside whichever terminal emulator is installed.
+        let run = format!(
+            "cd '{p}'; export STAPPLER_ROOT='{r}'; export PATH='{b}':\"$PATH\"; exec \"${{SHELL:-bash}}\""
+        );
+        // Try terminals in order; each gets the bash command via -e/--.
+        let launch = format!(
+            "if command -v konsole >/dev/null 2>&1; then exec konsole --workdir '{p}' -e bash -c \"$RUN\"; \
+             elif command -v gnome-terminal >/dev/null 2>&1; then exec gnome-terminal --working-directory='{p}' -- bash -c \"$RUN\"; \
+             elif command -v xfce4-terminal >/dev/null 2>&1; then exec xfce4-terminal --working-directory='{p}' -e \"bash -c '$RUN'\"; \
+             elif command -v x-terminal-emulator >/dev/null 2>&1; then exec x-terminal-emulator -e bash -c \"$RUN\"; \
+             elif command -v xterm >/dev/null 2>&1; then exec xterm -e bash -c \"$RUN\"; \
+             else exit 1; fi"
+        );
+        let mut c = std::process::Command::new("sh");
+        c.env("RUN", run).args(["-c", &launch]);
         c
     }
 }
@@ -807,6 +1345,11 @@ async fn build_project(
 fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Result<i32, String> {
     log::info!("build_project path={path} target={target} run={run}");
     let layout = layout()?;
+    // Heal toolchain links before building: older installs symlinked the store with
+    // ABSOLUTE paths, so moving the data root (`~/.xenolith` → `~/.local/share/…`)
+    // left them dangling ("no host specification found"). Relinking rewrites them as
+    // relative paths to the current store.
+    let _ = install::relink_all_engines(&layout);
     let reg = ProjectRegistry::load(&projects_path(&layout)).map_err(|e| e.to_string())?;
     let project = reg
         .projects
@@ -848,11 +1391,17 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
     // engine generate Contents/Info.plist, so it runs in place. Cross build: pass
     // STAPPLER_TARGET (can't run the result here anyway). Build number comes from
     // the `.build_number` files baked into the bundle.
-    // Build in parallel — one job per logical CPU. Without this make runs
-    // single-threaded (every step serially).
-    let jobs = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    // Build in parallel — settings override, else one job per logical CPU.
+    // Without -j make runs single-threaded (every step serially).
+    let jobs = load_settings()
+        .jobs
+        .filter(|n| *n >= 1)
+        .unwrap_or_else(auto_jobs);
+    // A target with the same base triple as the host (e.g. `<host>+sprt`) is the
+    // native arch and CAN run here; only a different-arch target is a true cross.
+    let target_base = target.split('+').next().unwrap_or(target);
+    let runnable = target_base == host;
+
     // STAPPLER_ROOT must use forward slashes: this env value overrides the
     // Makefile's default, and GNU make breaks on Windows backslash paths.
     let mut make = std::process::Command::new("make");
@@ -865,12 +1414,38 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
         // Russian Windows), which otherwise garbles the captured build log.
         .env("LC_ALL", "C")
         .env("LANG", "C");
-    if target != host {
+    if !runnable {
+        // True cross-compile: `install` the artifacts (can't run them here).
         make.arg("install").arg(format!("STAPPLER_TARGET={target}"));
+    } else if target != host {
+        // Native variant (e.g. +sprt): the DEFAULT goal builds the runnable .app
+        // WITH Contents/Info.plist (so the Vulkan loader finds Frameworks) —
+        // `make install` would skip the plist. Just select the target.
+        make.arg(format!("STAPPLER_TARGET={target}"));
     }
+    let started = std::time::Instant::now();
     let code = stream_cmd(app, &mut make)?;
-    // Run only a native build — a cross-compiled binary won't run on this host.
-    if code != 0 || !run || target != host {
+    // Report build wall-clock to the console (e.g. "✓ Built in 3m 21s").
+    let secs = started.elapsed().as_secs();
+    let dur = if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    };
+    let mark = if code == 0 {
+        "✓ Built"
+    } else {
+        "✗ Build failed"
+    };
+    let _ = app.emit(
+        "build://line",
+        BuildLineDto {
+            line: format!("{mark} in {dur} (exit {code})"),
+        },
+    );
+    // Run any native build (host or a same-arch variant like +sprt); a true
+    // cross-compiled binary won't run on this host.
+    if code != 0 || !run || !runnable {
         return Ok(code);
     }
 
@@ -941,13 +1516,22 @@ fn pump<R: std::io::Read>(r: R, emit: &dyn Fn(String)) {
 }
 
 fn stream_cmd(app: &AppHandle, cmd: &mut std::process::Command) -> Result<i32, String> {
+    use std::sync::atomic::Ordering;
     log::info!("exec: {cmd:?}");
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // Own process group so `cancel_build` can kill the whole build tree (make +
+    // the compilers it spawns), not just the top process.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().map_err(|e| {
         log::error!("spawn failed: {e}");
         e.to_string()
     })?;
+    BUILD_PID.store(child.id(), Ordering::Relaxed);
     let out = child.stdout.take();
     let err = child.stderr.take();
     let emit = |line: String| {
@@ -966,9 +1550,34 @@ fn stream_cmd(app: &AppHandle, cmd: &mut std::process::Command) -> Result<i32, S
         }
     });
     let status = child.wait().map_err(|e| e.to_string())?;
+    BUILD_PID.store(0, Ordering::Relaxed);
     let code = status.code().unwrap_or(-1);
     log::info!("exit: {code}");
     Ok(code)
+}
+
+/// Kill the running build (and its process group). No-op if nothing is building.
+#[tauri::command]
+fn cancel_build() -> Result<(), String> {
+    let pid = BUILD_PID.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if pid == 0 {
+        return Ok(());
+    }
+    log::info!("cancel_build pid={pid}");
+    #[cfg(unix)]
+    {
+        // Negative target = the whole process group (make + compilers).
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .status();
+    }
+    Ok(())
 }
 
 /// Where the rolling log file lives: the SDK root (`~/.local/share/xenolith/installer.log`),
@@ -1022,7 +1631,19 @@ pub fn run() {
             build_project,
             available_editors,
             open_in_editor,
-            open_working_dir
+            open_working_dir,
+            open_terminal,
+            clean_project,
+            install_for_system,
+            disk_usage,
+            remove_engine,
+            project_size,
+            get_settings,
+            set_settings,
+            set_data_dir,
+            cancel_build,
+            diagnostics_report,
+            run_doctor
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Xenolith installer");

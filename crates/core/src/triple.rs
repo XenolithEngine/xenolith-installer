@@ -11,8 +11,9 @@ use std::fmt;
 /// Host triples for which a host toolchain archive actually exists on the FTP
 /// (`/releases/<rel>/hosts/`). There is intentionally no `linux-arm64`,
 /// `win-arm64` or `macos-x64` host yet — see [`host_fallback`].
-pub const KNOWN_HOSTS: [&str; 3] = [
+pub const KNOWN_HOSTS: [&str; 4] = [
     "aarch64-apple-macosx",
+    "x86_64-apple-macosx",
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
@@ -62,8 +63,6 @@ pub fn host_fallback(triple: &str) -> Option<&'static str> {
         return KNOWN_HOSTS.into_iter().find(|h| *h == triple);
     }
     match triple {
-        // Apple silicon Macs run x86_64 binaries via Rosetta 2.
-        "x86_64-apple-macosx" => Some("aarch64-apple-macosx"),
         // Windows on ARM runs x86_64 binaries via emulation.
         "aarch64-pc-windows-msvc" => Some("x86_64-pc-windows-msvc"),
         _ => None,
@@ -170,11 +169,13 @@ mod tests {
     }
 
     #[test]
-    fn mac_x64_falls_back_to_arm_host_via_rosetta() {
+    fn mac_x64_is_a_native_host() {
+        // Intel Macs have their own x86_64 host toolchain — NOT an arm fallback
+        // (Intel can't run arm64; Rosetta only goes the other way).
         let r = resolve_host("x86_64", "macos").unwrap().unwrap();
         assert_eq!(r.native, "x86_64-apple-macosx");
-        assert_eq!(r.host_archive, "aarch64-apple-macosx");
-        assert!(r.via_emulation);
+        assert_eq!(r.host_archive, "x86_64-apple-macosx");
+        assert!(!r.via_emulation);
     }
 
     #[test]

@@ -23,20 +23,55 @@ pub fn component_dir(layout: &Layout, kind: Kind, id: &str) -> PathBuf {
     layout.toolchains_store_dir().join(kind.dir()).join(id)
 }
 
+/// Relative path from directory `from_dir` to `to` (both absolute). Used so the
+/// engine→store toolchain symlinks survive the whole data root being moved (e.g.
+/// `~/.xenolith` → `~/.local/share/xenolith`): an absolute target dangles, a
+/// relative one (`../../../../toolchains/…`) does not. Falls back to `to` if the
+/// paths share no common root (different Windows drives).
+fn relative_link(from_dir: &std::path::Path, to: &std::path::Path) -> std::path::PathBuf {
+    let from: Vec<_> = from_dir.components().collect();
+    let to_c: Vec<_> = to.components().collect();
+    let common = from
+        .iter()
+        .zip(to_c.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if common == 0 {
+        return to.to_path_buf();
+    }
+    let mut rel = PathBuf::new();
+    for _ in common..from.len() {
+        rel.push("..");
+    }
+    for c in &to_c[common..] {
+        rel.push(c.as_os_str());
+    }
+    if rel.as_os_str().is_empty() {
+        rel.push(".");
+    }
+    rel
+}
+
 /// Create a directory link `dst` -> `src`: a symlink on Unix; on Windows a
 /// symlink if allowed, otherwise a copy (junctions would avoid the copy but need
-/// an extra crate — a TODO).
+/// an extra crate — a TODO). The symlink target is RELATIVE so it survives the
+/// data root moving; the copy fallback uses the absolute `src`.
 fn link_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let rel = dst
+        .parent()
+        .map(|parent| relative_link(parent, src))
+        .unwrap_or_else(|| src.to_path_buf());
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(src, dst)
+        std::os::unix::fs::symlink(&rel, dst)
     }
     #[cfg(windows)]
     {
-        std::os::windows::fs::symlink_dir(src, dst).or_else(|_| copy_dir_all(src, dst))
+        std::os::windows::fs::symlink_dir(&rel, dst).or_else(|_| copy_dir_all(src, dst))
     }
     #[cfg(not(any(unix, windows)))]
     {
+        let _ = rel;
         copy_dir_all(src, dst)
     }
 }
