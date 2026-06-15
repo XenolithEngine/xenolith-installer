@@ -1391,10 +1391,25 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
         return Err(format!("target '{target}' is not installed"));
     }
     // Put the toolchain's compilers/make on PATH and point at STAPPLER_ROOT.
-    let path_env = std::env::join_paths(std::iter::once(host_bin).chain(std::env::split_paths(
+    // On Windows also guarantee PowerShell is on PATH: the engine's build recipes
+    // (buildconfig, shaders) are PowerShell-only, and `make` falls back to cmd.exe
+    // if it can't locate `powershell.exe`, which silently breaks them.
+    let mut path_dirs: Vec<std::path::PathBuf> = vec![host_bin];
+    #[cfg(target_os = "windows")]
+    let powershell_exe = {
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let ps_dir = std::path::PathBuf::from(&sysroot)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0");
+        let ps_exe = ps_dir.join("powershell.exe");
+        path_dirs.push(ps_dir);
+        ps_exe
+    };
+    path_dirs.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
-    )))
-    .map_err(|e| e.to_string())?;
+    ));
+    let path_env = std::env::join_paths(path_dirs).map_err(|e| e.to_string())?;
 
     // Native build: the default goal (host → all) builds the .app AND has the
     // engine generate Contents/Info.plist, so it runs in place. Cross build: pass
@@ -1423,6 +1438,18 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
         // Russian Windows), which otherwise garbles the captured build log.
         .env("LC_ALL", "C")
         .env("LANG", "C");
+    // Windows: the engine selects PowerShell recipes (OS=Windows_NT) but `make`
+    // often can't honor the makefile's `SHELL = powershell.exe` and falls back to
+    // cmd.exe, so PowerShell-only steps (buildconfig, shaders) break. Override
+    // SHELL with the absolute powershell path (forward slashes — GNU make dislikes
+    // backslashes) so the recipes actually run under PowerShell.
+    #[cfg(target_os = "windows")]
+    if powershell_exe.is_file() {
+        make.arg(format!(
+            "SHELL={}",
+            powershell_exe.to_string_lossy().replace('\\', "/")
+        ));
+    }
     if !runnable {
         // True cross-compile: `install` the artifacts (can't run them here).
         make.arg("install").arg(format!("STAPPLER_TARGET={target}"));
