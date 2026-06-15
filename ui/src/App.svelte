@@ -99,6 +99,7 @@
     "settings-reset": "Reset",
     "settings-restart": "Changing the data directory takes effect after a restart.",
     "datadir-no-space": "Path must not contain spaces",
+    "path-no-space": "Path must not contain spaces",
     "project-choose": "Choose…",
     "engine-required": "Install the engine SDK and a host toolchain first",
     "create-requirements": "Install the engine, your host toolchain and a target (in Packages) before creating a project",

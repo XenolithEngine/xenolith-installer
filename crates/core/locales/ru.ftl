@@ -57,6 +57,7 @@ doctor-title = Проверить установку
 report-copy = Скопировать отчёт
 report-copied = Отчёт скопирован в буфер
 datadir-no-space = Путь не должен содержать пробелов
+path-no-space = Путь не должен содержать пробелов
 engine-label = Движок
 engine-missing = SDK движка ещё не установлен
 engine-prepare = Подготовить SDK

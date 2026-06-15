@@ -49,10 +49,14 @@
 
   // Name must be non-empty and path/make-safe (no spaces).
   const nameValid = $derived(/^[A-Za-z0-9_-]+$/.test(name));
+  // The engine's make build breaks on spaces in the path, so reject them.
+  const locationBad = $derived(!!location && /\s/.test(location));
   const projectPath = $derived(location && name ? `${location}/${name}` : "");
   // Projects can only be created with an engine, the host toolchain, and a target.
   const ready = $derived(engines.length > 0 && hostInstalled && targets.length > 0);
-  const canCreate = $derived(nameValid && !!location && !!engine && !!newTarget && ready && !creating);
+  const canCreate = $derived(
+    nameValid && !!location && !locationBad && !!engine && !!newTarget && ready && !creating,
+  );
   const targetOf = (p: Project) => selTarget[p.path] ?? (p.target || host);
   // A same-arch target (e.g. <host>+sprt) is native and runnable; only a
   // different-arch triple is a true cross-compile that can't run here.
@@ -240,9 +244,12 @@
           <label>
             <span>{S["project-location"]}</span>
             <div class="path-row">
-              <input type="text" readonly value={location ?? ""} placeholder="…" />
+              <input type="text" readonly value={location ?? ""} placeholder="…" class:bad={locationBad} />
               <button class="btn ghost" onclick={choose}>{S["project-choose"]}</button>
             </div>
+            {#if locationBad}
+              <span class="hint err">{S["path-no-space"]}</span>
+            {/if}
           </label>
           <label>
             <span>{S["project-engine"]}</span>

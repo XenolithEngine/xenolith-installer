@@ -867,6 +867,11 @@ fn create_project(
     target: String,
 ) -> Result<ProjectDto, String> {
     log::info!("create_project name={name} location={location} engine={engine} target={target}");
+    // GNU make splits paths on whitespace, so a space anywhere in the project
+    // path breaks every build — reject it up front (the UI guards this too).
+    if location.contains(char::is_whitespace) {
+        return Err("project location must not contain spaces".into());
+    }
     let layout = layout()?;
     let engine_root = layout.engine_dir(&engine);
     if !engine_root.join("make").is_dir() {
@@ -1472,9 +1477,132 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
         .find(|p| p.exists())
         .cloned()
         .unwrap_or_else(|| out_dir.join(&exe_name));
+
+    // macOS: launch the `.app` through LaunchServices (`open`), NOT by exec'ing
+    // Contents/MacOS/<bin> directly. A directly-exec'd bundle runs as a background
+    // process: it creates its NSWindow/Metal layer (the swapchain logs appear) but
+    // never activates, so the window never comes to the front. `open` registers it
+    // as a foreground GUI app and brings the window up.
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle) = exe
+            .ancestors()
+            .find(|p| p.extension().is_some_and(|e| e == "app"))
+        {
+            return run_macos_bundle(app, bundle, &exe, path);
+        }
+    }
+
     let mut runner = std::process::Command::new(&exe);
     runner.current_dir(path);
     stream_cmd(app, &mut runner)
+}
+
+/// Launch a macOS `.app` via `open` so it activates and shows its window, while
+/// still streaming the app's stdout/stderr into the build console. `open -W` waits
+/// for the app to exit; its output is redirected to a log file we tail meanwhile.
+///
+/// If LaunchServices refuses (`open` prints `failed with error -10810`), fall back
+/// to exec'ing the binary directly so the app still runs.
+#[cfg(target_os = "macos")]
+fn run_macos_bundle(
+    app: &AppHandle,
+    bundle: &std::path::Path,
+    exe: &std::path::Path,
+    cwd: &str,
+) -> Result<i32, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::sync::atomic::Ordering;
+
+    let build_dir = std::path::Path::new(cwd).join("stappler-build");
+    let _ = std::fs::create_dir_all(&build_dir);
+    let log_path = build_dir.join("run.log");
+    let err_path = build_dir.join("run-open.err");
+    // Truncate any previous run's output.
+    let _ = std::fs::write(&log_path, b"");
+    let _ = std::fs::write(&err_path, b"");
+
+    let _ = app.emit(
+        "build://line",
+        BuildLineDto {
+            line: format!("▶ Launching {}", bundle.display()),
+        },
+    );
+
+    let open_err = std::fs::File::create(&err_path).map_err(|e| e.to_string())?;
+    let mut child = std::process::Command::new("open")
+        .arg("-W") // wait until the app exits
+        .arg("-n") // always a fresh instance
+        .arg("--stdout")
+        .arg(&log_path)
+        .arg("--stderr")
+        .arg(&log_path)
+        .arg(bundle)
+        .current_dir(cwd)
+        // A GUI app passes its `__CFBundleIdentifier` to children; if `open`
+        // inherits ours, LaunchServices misidentifies the caller and fails with
+        // -10810. Drop it so `open` runs in a clean LS context.
+        .env_remove("__CFBundleIdentifier")
+        .stderr(open_err) // `open`'s own messages (the app's go to --stderr)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    BUILD_PID.store(child.id(), Ordering::Relaxed);
+
+    // Tail the redirected log until `open` (and thus the app) exits.
+    let mut pos: u64 = 0;
+    let mut carry = String::new();
+    let pump_log = |pos: &mut u64, carry: &mut String| {
+        let Ok(mut f) = std::fs::File::open(&log_path) else {
+            return;
+        };
+        if f.seek(SeekFrom::Start(*pos)).is_err() {
+            return;
+        }
+        let mut buf = Vec::new();
+        if f.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+            *pos += buf.len() as u64;
+            carry.push_str(&String::from_utf8_lossy(&buf));
+            while let Some(nl) = carry.find('\n') {
+                let line: String = carry.drain(..=nl).collect();
+                let line = strip_ansi(line.trim_end_matches(['\n', '\r']));
+                log::info!("> {line}");
+                let _ = app.emit("build://line", BuildLineDto { line });
+            }
+        }
+    };
+
+    let status = loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) => break status,
+            None => {
+                pump_log(&mut pos, &mut carry);
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        }
+    };
+    pump_log(&mut pos, &mut carry); // flush the tail
+    if !carry.is_empty() {
+        let line = strip_ansi(carry.trim_end_matches(['\n', '\r']));
+        let _ = app.emit("build://line", BuildLineDto { line });
+    }
+    BUILD_PID.store(0, Ordering::Relaxed);
+
+    // Did LaunchServices refuse? If so, run the binary directly so it still starts.
+    let ls_failed = std::fs::read_to_string(&err_path)
+        .map(|s| s.contains("failed with error"))
+        .unwrap_or(false);
+    if ls_failed {
+        let _ = app.emit(
+            "build://line",
+            BuildLineDto {
+                line: "⚠ LaunchServices refused (open); launching the binary directly".into(),
+            },
+        );
+        let mut runner = std::process::Command::new(exe);
+        runner.current_dir(cwd);
+        return stream_cmd(app, &mut runner);
+    }
+    Ok(status.code().unwrap_or(0))
 }
 
 /// Remove ANSI CSI escape sequences (`ESC [ … <letter>`) from a line.

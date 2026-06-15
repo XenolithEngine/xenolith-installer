@@ -57,6 +57,7 @@ doctor-title = Check installation
 report-copy = Copy diagnostics
 report-copied = Diagnostics copied to clipboard
 datadir-no-space = Path must not contain spaces
+path-no-space = Path must not contain spaces
 engine-label = Engine
 engine-missing = Engine SDK not installed yet
 engine-prepare = Prepare SDK

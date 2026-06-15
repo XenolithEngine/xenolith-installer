@@ -57,6 +57,7 @@ doctor-title = 检查安装
 report-copy = 复制诊断信息
 report-copied = 诊断信息已复制到剪贴板
 datadir-no-space = 路径不能包含空格
+path-no-space = 路径不能包含空格
 engine-label = 引擎
 engine-missing = 引擎 SDK 尚未安装
 engine-prepare = 准备 SDK
