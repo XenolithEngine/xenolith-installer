@@ -1555,6 +1555,7 @@ fn run_macos_bundle(
             line: format!("▶ Launching {}", bundle.display()),
         },
     );
+    log::info!("run: launching {} via `open`", bundle.display());
 
     let open_err = std::fs::File::create(&err_path).map_err(|e| e.to_string())?;
     let mut child = std::process::Command::new("open")
@@ -1613,16 +1614,24 @@ fn run_macos_bundle(
         let _ = app.emit("build://line", BuildLineDto { line });
     }
     BUILD_PID.store(0, Ordering::Relaxed);
+    log::info!("run: `open` exited (code {:?})", status.code());
 
-    // Did LaunchServices refuse? If so, run the binary directly so it still starts.
-    let ls_failed = std::fs::read_to_string(&err_path)
-        .map(|s| s.contains("failed with error"))
-        .unwrap_or(false);
-    if ls_failed {
+    // `open` writes to its own stderr ONLY when something went wrong (e.g.
+    // LaunchServices -10810, or a TCC/automation permission denial). Any content
+    // there means the app almost certainly never launched — log the reason and
+    // fall back to exec'ing the binary directly: a plain fork/exec that bypasses
+    // LaunchServices (and its TCC gating) entirely, so the app still starts and we
+    // stream its output live.
+    let ls_err = std::fs::read_to_string(&err_path).unwrap_or_default();
+    if !ls_err.trim().is_empty() {
+        log::error!("run: `open` failed: {}", ls_err.trim());
         let _ = app.emit(
             "build://line",
             BuildLineDto {
-                line: "⚠ LaunchServices refused (open); launching the binary directly".into(),
+                line: format!(
+                    "⚠ `open` could not launch the app ({}). Launching the binary directly…",
+                    ls_err.trim()
+                ),
             },
         );
         let mut runner = std::process::Command::new(exe);
