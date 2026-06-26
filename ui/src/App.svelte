@@ -350,6 +350,7 @@
     } catch (e) {
       error = String(e);
     } finally {
+      progress = {};
       busy = false;
     }
   }
@@ -560,7 +561,11 @@
       // not `selectedRows` — means single-row installs and repairs get live
       // progress too, and a triple that is both host and target stays distinct.
       const k = `${p.kind}:${p.id}`;
-      if (k in progress) {
+      // Show the bar on the matching catalogue row for ANY non-onboarding install
+      // — single, repair, or "install everything" (which seeds nothing up front,
+      // so a `k in progress` guard would drop its events). The onboarding hero
+      // owns the display while it is booting.
+      if (!heroBooting) {
         progress[k] = p;
         progress = { ...progress };
       }
