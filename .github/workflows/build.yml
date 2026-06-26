@@ -168,9 +168,9 @@ jobs:
             target/release/bundle/**/*.exe
           if-no-files-found: warn
 
-      # ---- headless CLI: standalone binary for `xenolith-installer self-update` ----
+      # ---- headless CLI: standalone binary for `xenolith-installer-cli self-update` ----
       # `self_update` matches the release asset whose name contains the host target
-      # triple, so each tarball is named `xenolith-installer-<triple>.tar.gz`.
+      # triple, so each tarball is named `xenolith-installer-cli-<triple>.tar.gz`.
       - name: Build & package CLI
         shell: bash
         run: |
@@ -185,7 +185,7 @@ jobs:
             rustup target add "$T"
             cargo build -p xenolith-installer-cli --release --target "$T"
             EXT=""; [[ "$T" == *windows* ]] && EXT=".exe"
-            tar -C "target/$T/release" -czf "dist-cli/xenolith-installer-$T.tar.gz" "xenolith-installer${EXT}"
+            tar -C "target/$T/release" -czf "dist-cli/xenolith-installer-cli-$T.tar.gz" "xenolith-installer-cli${EXT}"
           done
 
       - name: Upload CLI to the release (tag)

@@ -22,7 +22,7 @@ use commands::{run, Command, Ctx};
 
 #[derive(Parser)]
 #[command(
-    name = "xenolith-installer",
+    name = "xenolith-installer-cli",
     about = "Install and manage the Xenolith Engine SDK",
     version
 )]
@@ -84,7 +84,7 @@ fn run_self_update() -> ExitCode {
     match self_update::backends::github::Update::configure()
         .repo_owner("XenolithEngine")
         .repo_name("xenolith-installer")
-        .bin_name("xenolith-installer")
+        .bin_name("xenolith-installer-cli")
         .current_version(env!("CARGO_PKG_VERSION"))
         .show_download_progress(true)
         .build()

@@ -6,7 +6,7 @@ The installer updates itself from **GitHub Releases**:
   `https://github.com/XenolithEngine/xenolith-installer/releases/latest/download/latest.json`,
   and if a newer **signed** build exists it shows a banner → downloads, verifies
   the minisign signature, installs and relaunches.
-- **CLI** ships a `xenolith-installer self-update` command that downloads the
+- **CLI** ships a `xenolith-installer-cli self-update` command that downloads the
   release asset matching the host target triple and replaces its own binary.
 
 ## One-time setup (signing key)
@@ -55,7 +55,7 @@ Then set these **repository secrets** (Settings → Secrets → Actions):
 
 - Auto-updatable bundle formats: macOS `.app.tar.gz`, Windows NSIS, Linux
   **AppImage** (deb/rpm are not self-updating).
-- The CLI tarballs are named `xenolith-installer-<target-triple>.tar.gz` so the
+- The CLI tarballs are named `xenolith-installer-cli-<target-triple>.tar.gz` so the
   `self_update` crate can pick the right one per host.
 - macOS is built universal for the GUI; the CLI is built for both
   `aarch64-apple-darwin` and `x86_64-apple-darwin`.

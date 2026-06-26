@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "xenolith-installer"
+name = "xenolith-installer-cli"
 path = "src/main.rs"
 
 [dependencies]
