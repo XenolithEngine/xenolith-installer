@@ -1,13 +1,17 @@
 name: Build installers
 
 # Cross-platform desktop bundles + self-update artifacts.
-#  * push a tag `vX.Y.Z`  -> builds all platforms, signs the updater artifacts,
-#    and attaches them (+ latest.json + the CLI binaries) to a draft GitHub
-#    Release for that tag. Review the draft, then PUBLISH it: the updater reads
-#    `releases/latest/download/latest.json`, which only resolves to a published
-#    (non-draft, non-prerelease) release.
-# Requires repo secrets TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD) — see docs/RELEASING.md.
+#  * push a tag `vX.Y.Z`  -> a single draft release is created up front, then all
+#    platforms build in parallel and upload their signed bundles (+ latest.json +
+#    the CLI binaries) into that one release. Review the draft, then PUBLISH it:
+#    the updater reads `releases/latest/download/latest.json`, which only resolves
+#    to a published (non-draft, non-prerelease) release.
 #  * run manually         -> builds all platforms, artifacts attached to the run.
+#
+# The draft is created by a dedicated `create-release` job (not by the matrix) so
+# parallel jobs don't race to create their own release — which produced duplicate
+# drafts with the assets split across them.
+# Requires repo secrets TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD) — see docs/RELEASING.md.
 on:
   workflow_dispatch:
   push:
@@ -18,10 +22,61 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Create exactly ONE draft release (tag pushes only) and hand its id to the
+  # matrix. Idempotent: any pre-existing release for this tag is deleted first so
+  # re-runs (e.g. a moved tag) don't pile up duplicate drafts.
+  create-release:
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load release notes
+        id: notes
+        shell: bash
+        run: |
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            cat RELEASE_NOTES.md
+            echo RELEASE_NOTES_EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          BODY: ${{ steps.notes.outputs.body }}
+        run: |
+          set -euo pipefail
+          # Drop any release already pointing at this tag (draft or not).
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/releases" \
+              --jq ".[] | select(.tag_name==\"$TAG\") | .id"); do
+            echo "deleting pre-existing release $id"
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+          done
+          rid=$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$TAG" \
+            -f name="Xenolith Installer $TAG" \
+            -f body="$BODY" \
+            -F draft=true \
+            -F prerelease=false \
+            --jq '.id')
+          echo "release_id=$rid" >> "$GITHUB_OUTPUT"
+          echo "created draft release $rid for $TAG"
+
   bundle:
     name: ${{ matrix.label }}
+    needs: create-release
+    # Run even when create-release was skipped (manual, non-tag runs); skip only
+    # if release creation actually failed.
+    if: ${{ always() && needs.create-release.result != 'failure' }}
     permissions:
-      contents: write # needed to create/update the release on a tag
+      contents: write # upload bundles + CLI to the release
     strategy:
       fail-fast: false
       matrix:
@@ -82,16 +137,6 @@ jobs:
           pnpm build
         working-directory: ui
 
-      - name: Load release notes
-        id: notes
-        shell: bash
-        run: |
-          {
-            echo 'body<<RELEASE_NOTES_EOF'
-            cat RELEASE_NOTES.md
-            echo RELEASE_NOTES_EOF
-          } >> "$GITHUB_OUTPUT"
-
       - name: Build app bundles (signed updater artifacts)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -104,12 +149,9 @@ jobs:
           # `-c tauri.ci.json` merges over tauri.conf.json to disable the
           # beforeBuildCommand (the frontend is already built in the step above).
           args: ${{ matrix.args }} -c tauri.ci.json
-          # On a tag push, publish to a draft release; otherwise just build.
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-          releaseName: ${{ github.ref_type == 'tag' && format('Xenolith Installer {0}', github.ref_name) || '' }}
-          releaseBody: ${{ steps.notes.outputs.body }}
-          releaseDraft: true
-          prerelease: false
+          # Upload into the single draft created by `create-release` (empty on
+          # non-tag runs → tauri-action just builds, no upload).
+          releaseId: ${{ needs.create-release.outputs.release_id }}
 
       - name: Upload bundles as run artifacts
         if: github.ref_type != 'tag'
@@ -146,12 +188,22 @@ jobs:
             tar -C "target/$T/release" -czf "dist-cli/xenolith-installer-$T.tar.gz" "xenolith-installer${EXT}"
           done
 
-      - name: Upload CLI to release (tag)
+      - name: Upload CLI to the release (tag)
         if: github.ref_type == 'tag'
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" dist-cli/* --clobber
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          up="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets"
+          for f in dist-cli/*; do
+            name=$(basename "$f")
+            echo "uploading $name"
+            gh api --method POST "$up?name=$name" \
+              -H "Content-Type: application/gzip" \
+              --input "$f" >/dev/null
+          done
 
       - name: Upload CLI as run artifacts (non-tag)
         if: github.ref_type != 'tag'
