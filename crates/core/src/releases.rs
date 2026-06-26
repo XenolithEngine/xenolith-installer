@@ -178,10 +178,26 @@ mod tests {
     #[test]
     fn newest_picks_beta_over_alpha_ignoring_files() {
         let entries = vec![
-            RemoteEntry { name: "infrastructure".into(), size: 0, is_dir: true },
-            RemoteEntry { name: "sdk-v0alpha0".into(), size: 0, is_dir: true },
-            RemoteEntry { name: "sdk-v0beta0".into(), size: 0, is_dir: true },
-            RemoteEntry { name: "README".into(), size: 12, is_dir: false },
+            RemoteEntry {
+                name: "infrastructure".into(),
+                size: 0,
+                is_dir: true,
+            },
+            RemoteEntry {
+                name: "sdk-v0alpha0".into(),
+                size: 0,
+                is_dir: true,
+            },
+            RemoteEntry {
+                name: "sdk-v0beta0".into(),
+                size: 0,
+                is_dir: true,
+            },
+            RemoteEntry {
+                name: "README".into(),
+                size: 12,
+                is_dir: false,
+            },
         ];
         let r = newest_from_entries(&entries).unwrap();
         assert_eq!(r.name, "sdk-v0beta0");
@@ -190,7 +206,11 @@ mod tests {
 
     #[test]
     fn newest_is_none_when_no_release_dirs() {
-        let entries = vec![RemoteEntry { name: "infrastructure".into(), size: 0, is_dir: true }];
+        let entries = vec![RemoteEntry {
+            name: "infrastructure".into(),
+            size: 0,
+            is_dir: true,
+        }];
         assert!(newest_from_entries(&entries).is_none());
     }
 

@@ -946,7 +946,9 @@ fn create_project(
     } else if available.iter().any(|t| t == &make_tool) {
         make_tool
     } else {
-        return Err(format!("build tool '{make_tool}' is not in the host toolchain"));
+        return Err(format!(
+            "build tool '{make_tool}' is not in the host toolchain"
+        ));
     };
     // The project lives in a new folder named after the project, inside `location`.
     let path = std::path::Path::new(&location).join(&name);
@@ -981,8 +983,13 @@ fn set_project_make_tool(path: String, make_tool: String) -> Result<ProjectDto, 
     let layout = layout()?;
     let host = native_host()?;
     let host_bin = install::component_dir(&layout, Kind::Host, &host).join("bin");
-    if !projects::available_make_tools(&host_bin).iter().any(|t| t == &make_tool) {
-        return Err(format!("build tool '{make_tool}' is not in the host toolchain"));
+    if !projects::available_make_tools(&host_bin)
+        .iter()
+        .any(|t| t == &make_tool)
+    {
+        return Err(format!(
+            "build tool '{make_tool}' is not in the host toolchain"
+        ));
     }
     let pp = projects_path(&layout);
     let mut reg = ProjectRegistry::load(&pp).map_err(|e| e.to_string())?;
@@ -992,8 +999,15 @@ fn set_project_make_tool(path: String, make_tool: String) -> Result<ProjectDto, 
         .find(|p| p.path.to_str() == Some(path.as_str()))
         .ok_or_else(|| "project not found".to_string())?;
     let engine_root = layout.engine_dir(&project.engine);
-    projects::set_make_tool(&project.path, &project.name, &engine_root, &host, &host_bin, &make_tool)
-        .map_err(|e| e.to_string())?;
+    projects::set_make_tool(
+        &project.path,
+        &project.name,
+        &engine_root,
+        &host,
+        &host_bin,
+        &make_tool,
+    )
+    .map_err(|e| e.to_string())?;
     project.make_tool = make_tool;
     let dto = project_dto(project);
     reg.save(&pp).map_err(|e| e.to_string())?;
@@ -1963,10 +1977,7 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
         .download_and_install(
             move |chunk, total| {
                 downloaded += chunk as u64;
-                let _ = app2.emit(
-                    "update://progress",
-                    UpdateProgressDto { downloaded, total },
-                );
+                let _ = app2.emit("update://progress", UpdateProgressDto { downloaded, total });
             },
             || log::info!("update download finished, installing"),
         )

@@ -240,13 +240,24 @@ pub fn scaffold(
 
     let exe = sanitize_name(name);
     // Empty (e.g. a legacy caller) → the historical default of GNU `make`.
-    let tool = if make_tool.is_empty() { "make" } else { make_tool };
+    let tool = if make_tool.is_empty() {
+        "make"
+    } else {
+        make_tool
+    };
     let make_bin = make_binary_name(tool);
     let makefile = dir.join("Makefile");
     if !makefile.exists() {
         std::fs::write(
             &makefile,
-            render(MAKEFILE_TMPL, engine_root, host_bin, host_triple, &exe, &make_bin),
+            render(
+                MAKEFILE_TMPL,
+                engine_root,
+                host_bin,
+                host_triple,
+                &exe,
+                &make_bin,
+            ),
         )?;
     }
 
@@ -289,7 +300,11 @@ pub fn set_make_tool(
     make_tool: &str,
 ) -> std::io::Result<()> {
     let exe = sanitize_name(name);
-    let tool = if make_tool.is_empty() { "make" } else { make_tool };
+    let tool = if make_tool.is_empty() {
+        "make"
+    } else {
+        make_tool
+    };
     let make_bin = make_binary_name(tool);
     write_vscode(dir, engine_root, host_triple, host_bin, &exe, &make_bin)
 }
@@ -388,7 +403,10 @@ mod tests {
         assert!(settings.contains(&format!("{}/clang-21", make_path(host_bin))));
         assert!(settings.contains(&format!("{}/lldb-dap", make_path(host_bin))));
         // The chosen build tool drives `makefile.makePath` (xlmake here, not make).
-        assert!(settings.contains(&format!("\"makefile.makePath\": \"{}/xlmake\"", make_path(host_bin))));
+        assert!(settings.contains(&format!(
+            "\"makefile.makePath\": \"{}/xlmake\"",
+            make_path(host_bin)
+        )));
         assert!(!settings.contains("/make\""));
         // binaryPath is OS-specific; the common prefix is present on every OS.
         assert!(settings.contains(&format!("stappler-build/{HOST}/debug/cc/My_Game")));
@@ -410,13 +428,19 @@ mod tests {
 
         // Initially makePath uses `make`; user code is the vendored scene.
         let settings0 = std::fs::read_to_string(proj.join(".vscode/settings.json")).unwrap();
-        assert!(settings0.contains(&format!("\"makefile.makePath\": \"{}/make\"", make_path(host_bin))));
+        assert!(settings0.contains(&format!(
+            "\"makefile.makePath\": \"{}/make\"",
+            make_path(host_bin)
+        )));
         std::fs::write(proj.join("src/ExampleScene.cpp"), b"// MY EDIT\n").unwrap();
 
         // Switch to xlmake.
         set_make_tool(&proj, "My Game", &engine, HOST, host_bin, "xlmake").unwrap();
         let settings1 = std::fs::read_to_string(proj.join(".vscode/settings.json")).unwrap();
-        assert!(settings1.contains(&format!("\"makefile.makePath\": \"{}/xlmake\"", make_path(host_bin))));
+        assert!(settings1.contains(&format!(
+            "\"makefile.makePath\": \"{}/xlmake\"",
+            make_path(host_bin)
+        )));
         // src/ is user-owned — must NOT be clobbered.
         assert_eq!(
             std::fs::read_to_string(proj.join("src/ExampleScene.cpp")).unwrap(),
