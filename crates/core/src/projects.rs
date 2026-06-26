@@ -90,6 +90,20 @@ pub fn installed_targets(layout: &Layout) -> Vec<String> {
     list_subdirs(&layout.toolchains_store_dir().join("targets"))
 }
 
+/// The build tool to use by default on this host: `xlmake` on Windows (the
+/// Windows toolchain ships no GNU `make`), `make` everywhere else.
+///
+/// The per-project build-tool *selector* is parked for now — projects always use
+/// this platform default. The selection plumbing ([`available_make_tools`],
+/// [`set_make_tool`], the UI selectors) is kept but unused so it can be revived.
+pub fn default_make_tool() -> &'static str {
+    if std::env::consts::OS == "windows" {
+        "xlmake"
+    } else {
+        "make"
+    }
+}
+
 /// Build tools that can drive a project's Makefile, in preference order (the
 /// first present is the default). Both ship in the host toolchain's `bin/`; the
 /// Windows toolchain ships only `xlmake`, so there the choice collapses to one.
