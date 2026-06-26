@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_updater::UpdaterExt;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use std::collections::HashMap;
@@ -17,7 +18,9 @@ use xenolith_installer_core::{
     key_source,
     manifest::{self, Kind},
     projects::{self, Project, ProjectRegistry},
+    releases,
     state::InstalledState,
+    transport::Transport,
     transport_ftp::FtpTransport,
     triple::{self, resolve_host},
     verify::PgpVerifier,
@@ -32,8 +35,12 @@ fn parse_kind(kind: &str) -> Result<Kind, String> {
 }
 
 const SERVER: &str = "stappler.dev:21";
-const REMOTE_BASE: &str = "/releases/sdk-v0alpha0";
-const RELEASE: &str = "sdk-v0alpha0";
+/// Root holding one directory per release; the newest is selected at runtime so
+/// a freshly-published pre-release (e.g. beta after alpha) surfaces without a
+/// code change. See [`resolve_release`].
+const RELEASES_ROOT: &str = "/releases";
+/// Used only if listing `/releases` fails or finds nothing recognisable.
+const FALLBACK_RELEASE: &str = "sdk-v0alpha0";
 const LIST_ATTEMPTS: u32 = 4;
 /// Engine bundle ref to install as STAPPLER_ROOT (temporary GH-release source).
 const ENGINE_REF: &str = "master";
@@ -47,6 +54,32 @@ static INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Lock `INSTALL_LOCK`, recovering the guard if a previous holder panicked.
 fn install_guard() -> std::sync::MutexGuard<'static, ()> {
     INSTALL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Discover the newest published release by listing `/releases`, falling back to
+/// [`FALLBACK_RELEASE`] if the listing fails or holds nothing recognisable.
+/// Returns `(remote_base, release_name)`.
+fn resolve_release(transport: &dyn Transport) -> (String, String) {
+    let fallback = || {
+        (
+            format!("{RELEASES_ROOT}/{FALLBACK_RELEASE}"),
+            FALLBACK_RELEASE.to_string(),
+        )
+    };
+    match releases::latest_release(transport, RELEASES_ROOT, LIST_ATTEMPTS) {
+        Ok(Some(r)) => {
+            log::info!("selected release {}", r.name);
+            (r.base(RELEASES_ROOT), r.name)
+        }
+        Ok(None) => {
+            log::warn!("no release found under {RELEASES_ROOT}; using {FALLBACK_RELEASE}");
+            fallback()
+        }
+        Err(e) => {
+            log::warn!("release discovery failed ({e}); using {FALLBACK_RELEASE}");
+            fallback()
+        }
+    }
 }
 
 /// PID of the in-flight build/run child (0 = none), so `cancel_build` can stop it.
@@ -302,8 +335,9 @@ async fn load_catalog() -> Result<CatalogDto, String> {
 fn load_catalog_blocking() -> Result<CatalogDto, String> {
     let layout = layout()?;
     let transport = FtpTransport::new(SERVER);
+    let (remote_base, release) = resolve_release(&transport);
     let (manifest, dropped) =
-        manifest::fetch_manifest(&transport, REMOTE_BASE, RELEASE, LIST_ATTEMPTS)
+        manifest::fetch_manifest(&transport, &remote_base, &release, LIST_ATTEMPTS)
             .map_err(|e| e.to_string())?;
     let state = InstalledState::load(&layout.installed_manifest()).map_err(|e| e.to_string())?;
     let mut rows = build_catalog(&manifest, &state);
@@ -340,17 +374,18 @@ fn install_blocking(app: &AppHandle, id: &str, kind: Kind) -> Result<(), String>
         ensure_engine(app, &layout, false)?;
     }
     let transport = FtpTransport::new(SERVER);
+    let (remote_base, release) = resolve_release(&transport);
     // Establish the trusted signing key (fetched from a keyserver, pinned).
     let asc = key_source::fetch_release_key().map_err(|e| e.to_string())?;
     let verifier = PgpVerifier::release(&asc).map_err(|e| e.to_string())?;
-    let (manifest, _) = manifest::fetch_manifest(&transport, REMOTE_BASE, RELEASE, LIST_ATTEMPTS)
+    let (manifest, _) = manifest::fetch_manifest(&transport, &remote_base, &release, LIST_ATTEMPTS)
         .map_err(|e| e.to_string())?;
     let installer = Installer {
         transport: &transport,
         verifier: &verifier,
         layout: &layout,
-        remote_base: REMOTE_BASE.into(),
-        release: RELEASE.into(),
+        remote_base,
+        release,
     };
     install_one(app, &installer, &manifest, &layout, id, kind)
 }
@@ -430,17 +465,18 @@ async fn install_for_system(app: AppHandle) -> Result<(), String> {
             ensure_engine(&app, &layout, false)?;
         }
         let transport = FtpTransport::new(SERVER);
+        let (remote_base, release) = resolve_release(&transport);
         let asc = key_source::fetch_release_key().map_err(|e| e.to_string())?;
         let verifier = PgpVerifier::release(&asc).map_err(|e| e.to_string())?;
         let (manifest, _) =
-            manifest::fetch_manifest(&transport, REMOTE_BASE, RELEASE, LIST_ATTEMPTS)
+            manifest::fetch_manifest(&transport, &remote_base, &release, LIST_ATTEMPTS)
                 .map_err(|e| e.to_string())?;
         let installer = Installer {
             transport: &transport,
             verifier: &verifier,
             layout: &layout,
-            remote_base: REMOTE_BASE.into(),
-            release: RELEASE.into(),
+            remote_base,
+            release,
         };
 
         install_one(&app, &installer, &manifest, &layout, &host, Kind::Host)
@@ -800,6 +836,7 @@ struct ProjectDto {
     path: String,
     engine: String,
     target: String,
+    make_tool: String,
     created_at: String,
 }
 
@@ -814,6 +851,7 @@ fn project_dto(p: &Project) -> ProjectDto {
         path: p.path.display().to_string(),
         engine: p.engine.clone(),
         target: p.target.clone(),
+        make_tool: p.make_tool.clone(),
         created_at: p.created_at.clone(),
     }
 }
@@ -844,17 +882,20 @@ struct TargetsDto {
     targets: Vec<String>,
     host: String,
     host_installed: bool,
+    /// Build tools available in the host toolchain (`xlmake`/`make`), preference
+    /// order. One entry → no choice; two → the UI shows a selector.
+    make_tools: Vec<String>,
 }
 
 #[tauri::command]
 fn project_targets() -> Result<TargetsDto, String> {
     let layout = layout()?;
     let host = native_host()?;
+    let host_bin = install::component_dir(&layout, Kind::Host, &host).join("bin");
     Ok(TargetsDto {
         targets: projects::installed_targets(&layout),
-        host_installed: install::component_dir(&layout, Kind::Host, &host)
-            .join("bin")
-            .is_dir(),
+        host_installed: host_bin.is_dir(),
+        make_tools: projects::available_make_tools(&host_bin),
         host,
     })
 }
@@ -865,8 +906,11 @@ fn create_project(
     name: String,
     engine: String,
     target: String,
+    make_tool: String,
 ) -> Result<ProjectDto, String> {
-    log::info!("create_project name={name} location={location} engine={engine} target={target}");
+    log::info!(
+        "create_project name={name} location={location} engine={engine} target={target} make_tool={make_tool}"
+    );
     // GNU make splits paths on whitespace, so a space anywhere in the project
     // path breaks every build — reject it up front (the UI guards this too).
     if location.contains(char::is_whitespace) {
@@ -894,9 +938,20 @@ fn create_project(
         return Err(format!("target '{target}' is not installed"));
     }
     let host_bin = install::component_dir(&layout, Kind::Host, &host).join("bin");
+    // Validate the chosen build tool against what the host toolchain actually
+    // ships; default to the first available if the UI sent nothing.
+    let available = projects::available_make_tools(&host_bin);
+    let make_tool = if make_tool.is_empty() {
+        available.first().cloned().unwrap_or_else(|| "make".into())
+    } else if available.iter().any(|t| t == &make_tool) {
+        make_tool
+    } else {
+        return Err(format!("build tool '{make_tool}' is not in the host toolchain"));
+    };
     // The project lives in a new folder named after the project, inside `location`.
     let path = std::path::Path::new(&location).join(&name);
-    projects::scaffold(&path, &name, &engine_root, &host, &host_bin).map_err(|e| e.to_string())?;
+    projects::scaffold(&path, &name, &engine_root, &host, &host_bin, &make_tool)
+        .map_err(|e| e.to_string())?;
 
     let now = OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -906,6 +961,7 @@ fn create_project(
         path,
         engine,
         target,
+        make_tool,
         created_at: now,
     };
     let pp = projects_path(&layout);
@@ -913,6 +969,35 @@ fn create_project(
     reg.add(project.clone());
     reg.save(&pp).map_err(|e| e.to_string())?;
     Ok(project_dto(&project))
+}
+
+/// Switch an existing project's build tool: validate it against the host
+/// toolchain, persist it to the registry, and rewrite the project's `.vscode`
+/// config so VS Code drives the build with the chosen tool. Returns the updated
+/// project.
+#[tauri::command]
+fn set_project_make_tool(path: String, make_tool: String) -> Result<ProjectDto, String> {
+    log::info!("set_project_make_tool path={path} make_tool={make_tool}");
+    let layout = layout()?;
+    let host = native_host()?;
+    let host_bin = install::component_dir(&layout, Kind::Host, &host).join("bin");
+    if !projects::available_make_tools(&host_bin).iter().any(|t| t == &make_tool) {
+        return Err(format!("build tool '{make_tool}' is not in the host toolchain"));
+    }
+    let pp = projects_path(&layout);
+    let mut reg = ProjectRegistry::load(&pp).map_err(|e| e.to_string())?;
+    let project = reg
+        .projects
+        .iter_mut()
+        .find(|p| p.path.to_str() == Some(path.as_str()))
+        .ok_or_else(|| "project not found".to_string())?;
+    let engine_root = layout.engine_dir(&project.engine);
+    projects::set_make_tool(&project.path, &project.name, &engine_root, &host, &host_bin, &make_tool)
+        .map_err(|e| e.to_string())?;
+    project.make_tool = make_tool;
+    let dto = project_dto(project);
+    reg.save(&pp).map_err(|e| e.to_string())?;
+    Ok(dto)
 }
 
 #[tauri::command]
@@ -949,6 +1034,36 @@ fn has_command(cmd: &str) -> bool {
 }
 #[cfg(not(target_os = "windows"))]
 fn has_command(cmd: &str) -> bool {
+    use std::path::PathBuf;
+    // A Finder-launched GUI app inherits launchd's minimal PATH (`/usr/bin:/bin:…`),
+    // and a non-interactive login shell can still miss CLIs whose PATH entry lives in
+    // `.zshrc` or behind a tty guard — so a packaged build wouldn't see `claude`,
+    // `code`, etc. Check the inherited PATH and the common user/brew bin dirs
+    // DIRECTLY (no subprocess, no tty dependency), then fall back to a login shell.
+    let on_path = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
+        .unwrap_or(false);
+    if on_path {
+        return true;
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let h = PathBuf::from(home);
+        for s in [
+            ".local/bin",
+            ".bun/bin",
+            ".npm-global/bin",
+            ".cargo/bin",
+            ".deno/bin",
+        ] {
+            dirs.push(h.join(s));
+        }
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    if dirs.iter().any(|d| d.join(cmd).is_file()) {
+        return true;
+    }
     std::process::Command::new("zsh")
         .args(["-lc", &format!("command -v {cmd} >/dev/null 2>&1")])
         .status()
@@ -1428,7 +1543,16 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
 
     // STAPPLER_ROOT must use forward slashes: this env value overrides the
     // Makefile's default, and GNU make breaks on Windows backslash paths.
-    let mut make = std::process::Command::new("make");
+    // Drive the build with the tool the project was created with (`xlmake`/`make`)
+    // so the GUI build matches the VS Code `makefile.makePath`. Legacy projects
+    // with no recorded tool fall back to GNU make. Both resolve via PATH (the host
+    // toolchain `bin/` is prepended above); on Windows `Command` appends `.exe`.
+    let tool = if project.make_tool.is_empty() {
+        "make"
+    } else {
+        project.make_tool.as_str()
+    };
+    let mut make = std::process::Command::new(tool);
     make.current_dir(path)
         .arg(format!("-j{jobs}"))
         .env("STAPPLER_ROOT", projects::make_path(&engine_root))
@@ -1781,6 +1905,78 @@ fn log_dir() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+// ---------- self-update (Tauri updater, GitHub releases) ----------
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateDto {
+    /// Version offered by the release manifest.
+    version: String,
+    /// Version currently running.
+    current_version: String,
+    /// Release notes, if the manifest carries them.
+    notes: Option<String>,
+    /// Publish date (RFC 3339), if present.
+    date: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProgressDto {
+    downloaded: u64,
+    /// Total bytes, if the server sent a content length.
+    total: Option<u64>,
+}
+
+/// Check the configured GitHub release endpoint for a newer signed build.
+/// `Ok(None)` means we are up to date.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<UpdateDto>, String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await.map_err(|e| e.to_string())? {
+        Some(u) => Ok(Some(UpdateDto {
+            version: u.version.clone(),
+            current_version: u.current_version.clone(),
+            notes: u.body.clone(),
+            date: u.date.and_then(|d| d.format(&Rfc3339).ok()),
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Download + verify (minisign) + install the latest update, streaming bytes as
+/// `update://progress`, then relaunch into the new version. Does not return on
+/// success (the app restarts).
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no update available".to_string())?;
+    log::info!("install_update -> {}", update.version);
+
+    let app2 = app.clone();
+    let mut downloaded: u64 = 0;
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = app2.emit(
+                    "update://progress",
+                    UpdateProgressDto { downloaded, total },
+                );
+            },
+            || log::info!("update download finished, installing"),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Relaunch into the freshly installed version (diverges — never returns).
+    app.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1807,6 +2003,7 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             detect_host,
             translate,
@@ -1819,6 +2016,7 @@ pub fn run() {
             project_targets,
             list_projects,
             create_project,
+            set_project_make_tool,
             remove_project,
             build_project,
             available_editors,
@@ -1835,7 +2033,9 @@ pub fn run() {
             set_data_dir,
             cancel_build,
             diagnostics_report,
-            run_doctor
+            run_doctor,
+            check_update,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Xenolith installer");

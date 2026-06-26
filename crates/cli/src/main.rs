@@ -61,6 +61,8 @@ enum Sub {
     Verify,
     /// Show components for which a newer release exists.
     Update,
+    /// Update this installer binary itself from the latest GitHub release.
+    SelfUpdate,
 }
 
 impl From<Sub> for Command {
@@ -71,12 +73,46 @@ impl From<Sub> for Command {
             Sub::Install { id } => Command::Install { id },
             Sub::Verify => Command::Verify,
             Sub::Update => Command::Update,
+            // Intercepted in `main` before dispatch (it needs no FTP/key context).
+            Sub::SelfUpdate => unreachable!("self-update is handled before dispatch"),
+        }
+    }
+}
+
+/// Replace this binary with the newest GitHub release asset for the host target.
+fn run_self_update() -> ExitCode {
+    match self_update::backends::github::Update::configure()
+        .repo_owner("XenolithEngine")
+        .repo_name("xenolith-installer")
+        .bin_name("xenolith-installer")
+        .current_version(env!("CARGO_PKG_VERSION"))
+        .show_download_progress(true)
+        .build()
+        .and_then(|u| u.update())
+    {
+        Ok(self_update::Status::UpToDate(v)) => {
+            println!("already up to date ({v})");
+            ExitCode::SUCCESS
+        }
+        Ok(self_update::Status::Updated(v)) => {
+            println!("updated to {v}; re-run to use the new version");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: self-update failed: {e}");
+            ExitCode::FAILURE
         }
     }
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    // Self-update needs neither the FTP transport nor the signing key, so handle
+    // it before building that context.
+    if matches!(cli.command, Sub::SelfUpdate) {
+        return run_self_update();
+    }
 
     let layout = match Layout::resolve_from_env(cli.prefix.as_deref()) {
         Ok(l) => l,

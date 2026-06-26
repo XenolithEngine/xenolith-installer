@@ -1,8 +1,12 @@
 name: Build installers
 
-# Cross-platform desktop bundles (unsigned for now).
-#  * push a tag `vX.Y.Z`  -> builds all platforms and attaches them to a draft
-#    GitHub Release for that tag (review the draft, then publish).
+# Cross-platform desktop bundles + self-update artifacts.
+#  * push a tag `vX.Y.Z`  -> builds all platforms, signs the updater artifacts,
+#    and attaches them (+ latest.json + the CLI binaries) to a draft GitHub
+#    Release for that tag. Review the draft, then PUBLISH it: the updater reads
+#    `releases/latest/download/latest.json`, which only resolves to a published
+#    (non-draft, non-prerelease) release.
+# Requires repo secrets TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD) — see docs/RELEASING.md.
 #  * run manually         -> builds all platforms, artifacts attached to the run.
 on:
   workflow_dispatch:
@@ -88,10 +92,13 @@ jobs:
             echo RELEASE_NOTES_EOF
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build app bundles (unsigned)
+      - name: Build app bundles (signed updater artifacts)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater artifacts + latest.json with the minisign key.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/gui
           # `-c tauri.ci.json` merges over tauri.conf.json to disable the
@@ -117,4 +124,39 @@ jobs:
             target/release/bundle/**/*.AppImage
             target/release/bundle/**/*.msi
             target/release/bundle/**/*.exe
+          if-no-files-found: warn
+
+      # ---- headless CLI: standalone binary for `xenolith-installer self-update` ----
+      # `self_update` matches the release asset whose name contains the host target
+      # triple, so each tarball is named `xenolith-installer-<triple>.tar.gz`.
+      - name: Build & package CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.os }}" in
+            macos-latest)   TARGETS="aarch64-apple-darwin x86_64-apple-darwin" ;;
+            ubuntu-22.04)   TARGETS="x86_64-unknown-linux-gnu" ;;
+            windows-latest) TARGETS="x86_64-pc-windows-msvc" ;;
+          esac
+          mkdir -p dist-cli
+          for T in $TARGETS; do
+            rustup target add "$T"
+            cargo build -p xenolith-installer-cli --release --target "$T"
+            EXT=""; [[ "$T" == *windows* ]] && EXT=".exe"
+            tar -C "target/$T/release" -czf "dist-cli/xenolith-installer-$T.tar.gz" "xenolith-installer${EXT}"
+          done
+
+      - name: Upload CLI to release (tag)
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" dist-cli/* --clobber
+
+      - name: Upload CLI as run artifacts (non-tag)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenolith-cli-${{ matrix.os }}
+          path: dist-cli/*
           if-no-files-found: warn

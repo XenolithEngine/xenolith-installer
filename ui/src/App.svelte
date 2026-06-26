@@ -5,6 +5,10 @@
     install,
     uninstall,
     onInstallProgress,
+    checkUpdate,
+    installUpdate,
+    onUpdateProgress,
+    type UpdateInfo,
     engineStatus,
     prepareEngine,
     onEngineProgress,
@@ -61,6 +65,7 @@
     "project-choose": "Choose…",
     "project-engine": "Engine version",
     "project-target": "Build target",
+    "project-make-tool": "Build tool",
     "run-host-only": "Run is only available when the target matches your host",
     "project-create": "Create",
     "project-build": "Build",
@@ -74,6 +79,9 @@
     "install-all": "Install everything for my system",
     "install-all-hint": "Engine + your host toolchain + the native target",
     "action-repair": "Repair (re-download)",
+    "action-update": "Update",
+    "action-refresh-all": "Refresh all",
+    "update-app-available": "App update available:",
     "storage-title": "Disk usage",
     "storage-engines": "Engines",
     "storage-hosts": "Host toolchains",
@@ -149,6 +157,11 @@
 
   const selectedRows = $derived(catalog ? catalog.rows.filter((r) => selected[key(r)]) : []);
   const selectedCount = $derived(selectedRows.length);
+
+  const updatableRows = $derived(
+    catalog ? catalog.rows.filter((r) => r.status.status === "update-available") : [],
+  );
+  const updatableCount = $derived(updatableRows.length);
 
   const fmtSize = (b: number) => `${(b / 1_000_000).toFixed(1)} MB`;
 
@@ -275,6 +288,28 @@
     }
   }
 
+  // Re-install every component that has a newer release, in place. Each install
+  // pulls the latest release, so on success the row is current.
+  async function updateAll() {
+    if (busy || !updatableCount) return;
+    busy = true;
+    error = null;
+    try {
+      for (const row of updatableRows) {
+        progress[key(row)] = { id: row.id, phase: "downloading", bytes: 0 };
+        await install(row.id, row.kind);
+        delete progress[key(row)];
+        progress = { ...progress };
+        setStatus(row, { status: "installed" });
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      progress = {};
+      busy = false;
+    }
+  }
+
   // window.confirm() is a no-op in the Tauri webview, so use an in-app modal.
   let pending = $state<{ row: CatalogRow; msg: string } | null>(null);
 
@@ -319,7 +354,9 @@
     }
   }
 
-  // Repair = re-download + overwrite the installed component.
+  // Repair = re-download + overwrite the installed component. Also serves the
+  // "update available" case: re-installing pulls the newest release, so on
+  // success the row is current — flip it to Installed without a catalogue reload.
   async function repair(row: CatalogRow) {
     if (busy) return;
     busy = true;
@@ -327,6 +364,7 @@
     try {
       progress[key(row)] = { id: row.id, phase: "downloading", bytes: 0 };
       await install(row.id, row.kind);
+      setStatus(row, { status: "installed" });
     } catch (e) {
       error = String(e);
     } finally {
@@ -482,10 +520,35 @@
     }
   }
 
+  // Self-update banner: a newer signed build on GitHub releases.
+  let updateInfo = $state<UpdateInfo | null>(null);
+  let updating = $state(false);
+  let updatePct = $state<number | null>(null);
+
+  async function runUpdate() {
+    if (updating) return;
+    updating = true;
+    error = null;
+    try {
+      // Downloads, verifies, installs, and relaunches — does not resolve on success.
+      await installUpdate();
+    } catch (e) {
+      error = String(e);
+      updating = false;
+    }
+  }
+
   onMount(() => {
     // Settings first so the right language is active before strings load.
     loadSettings().then(loadStrings);
     refresh();
+    // Self-update: check in the background; surface a banner if a newer build exists.
+    checkUpdate()
+      .then((u) => (updateInfo = u))
+      .catch(() => {});
+    const unUpd = onUpdateProgress((p) => {
+      updatePct = p.total ? Math.min(100, (p.downloaded / p.total) * 100) : null;
+    });
     // Resolve engine + boot state before unveiling the UI, so the hero/shell
     // choice is made from real data, not the empty defaults.
     Promise.all([
@@ -493,8 +556,14 @@
       loadBootState(),
     ]).finally(() => (bootChecked = true));
     const un = onInstallProgress((p) => {
-      for (const row of selectedRows) if (row.id === p.id) progress[key(row)] = p;
-      progress = { ...progress };
+      // Address the in-flight row directly by (kind,id). Keying off the event —
+      // not `selectedRows` — means single-row installs and repairs get live
+      // progress too, and a triple that is both host and target stays distinct.
+      const k = `${p.kind}:${p.id}`;
+      if (k in progress) {
+        progress[k] = p;
+        progress = { ...progress };
+      }
       // Onboarding hero: map by kind (plain target shares the host's id).
       if (heroBooting) {
         heroStep = p.kind === "host" ? "host" : "target";
@@ -534,6 +603,7 @@
     return () => {
       un.then((f) => f());
       unEng.then((f) => f());
+      unUpd.then((f) => f());
     };
   });
 </script>
@@ -649,6 +719,22 @@
     </div>
   </header>
 
+  {#if updateInfo}
+    <div class="update-banner">
+      <span class="ub-text">
+        {S["update-app-available"]} <strong>{updateInfo.version}</strong>
+      </span>
+      {#if updating}
+        <div class="ub-prog">
+          <div class="bar"><div class="fill" class:pulse={updatePct === null} style="width:{updatePct ?? 100}%"></div></div>
+          <span class="pct">{updatePct !== null ? Math.round(updatePct) + "%" : S["action-installing"]}</span>
+        </div>
+      {:else}
+        <button class="btn primary sm" onclick={runUpdate}>{S["action-update"]}</button>
+      {/if}
+    </div>
+  {/if}
+
   {#if tab === "projects"}
     <main><Projects {S} {createSignal} goToPackages={() => (tab = "packages")} /></main>
   {:else}
@@ -710,10 +796,12 @@
           {#if !collapsed[kind]}
             {#each rowsFor(kind) as row (key(row))}
               {@const installed = row.status.status === "installed"}
+              {@const updatable = row.status.status === "update-available"}
+              {@const present = installed || updatable}
               <div class="row" class:native={isNative(row)}>
                 <span class="c-check">
-                  {#if installed}
-                    <button class="trash" title={S["action-delete"]} onclick={() => removeRow(row)} disabled={busy} aria-label={S["action-delete"]}>
+                  {#if present}
+                    <button class="trash" data-tip={S["action-delete"]} onclick={() => removeRow(row)} disabled={busy} aria-label={S["action-delete"]}>
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6" />
                       </svg>
@@ -737,9 +825,19 @@
                       <span class="pct">{pLabel(p, row.size)}</span>
                     </div>
                   {:else}
-                    <span class="badge {row.status.status}">{statusText(row)}</span>
-                    {#if installed}
-                      <button class="repair" title={S["action-repair"]} onclick={() => repair(row)} disabled={busy} aria-label={S["action-repair"]}>
+                    {#if present}
+                      <span class="badge installed">{S["status-installed"]}</span>
+                    {:else}
+                      <span class="badge {row.status.status}">{statusText(row)}</span>
+                    {/if}
+                    {#if updatable}
+                      <button class="repair update" data-tip={S["action-update"]} onclick={() => repair(row)} disabled={busy} aria-label={S["action-update"]}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14" />
+                        </svg>
+                      </button>
+                    {:else if installed}
+                      <button class="repair" data-tip={S["action-repair"]} onclick={() => repair(row)} disabled={busy} aria-label={S["action-repair"]}>
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                           <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" />
                         </svg>
@@ -756,7 +854,9 @@
   </main>
 
   <footer class="glass">
-    <button class="btn ghost" onclick={refresh} disabled={loading || busy}>{S["action-refresh"]}</button>
+    <button class="btn ghost" onclick={updateAll} disabled={!updatableCount || busy || loading}>
+      {updatableCount ? `${S["action-refresh-all"]} (${updatableCount})` : S["action-refresh-all"]}
+    </button>
     <button class="btn ghost" onclick={installEverything} disabled={busy || loading} title={S["install-all-hint"]}>
       ⚡ {S["install-all"]}
     </button>
@@ -926,6 +1026,30 @@
     font-size: 18px;
     font-weight: 600;
   }
+  .update-banner {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 0 24px 10px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: rgba(252, 180, 0, 0.12);
+    border: 1px solid rgba(252, 180, 0, 0.35);
+    font-size: 13px;
+  }
+  .update-banner .ub-text {
+    flex: 1;
+    color: var(--xeno-text, #fff);
+  }
+  .update-banner strong {
+    color: var(--xeno-accent, #fcb400);
+  }
+  .update-banner .ub-prog {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 180px;
+  }
   .meta {
     display: flex;
     gap: 16px;
@@ -1009,6 +1133,34 @@
   }
   .repair:disabled {
     opacity: 0.4;
+  }
+  /* Custom tooltip: WKWebView (macOS) does not render native `title` tooltips,
+     so action buttons carry `data-tip` and we draw our own on hover. */
+  [data-tip] {
+    position: relative;
+  }
+  [data-tip]:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: 100%;
+    right: 0;
+    margin-bottom: 6px;
+    padding: 4px 8px;
+    background: #292929;
+    color: #fff;
+    font-size: 12px;
+    line-height: 1.2;
+    white-space: nowrap;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+    z-index: 50;
+  }
+  /* Trash sits at the row's left edge — anchor its tooltip left so it stays on-screen. */
+  .trash[data-tip]:hover::after {
+    right: auto;
+    left: 0;
   }
   .storage {
     width: min(560px, 92vw);

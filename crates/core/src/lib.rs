@@ -17,6 +17,7 @@ pub mod install;
 pub mod key_source;
 pub mod manifest;
 pub mod projects;
+pub mod releases;
 pub mod state;
 pub mod transport;
 #[cfg(feature = "ftp")]

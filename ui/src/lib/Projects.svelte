@@ -5,6 +5,7 @@
     projectTargets,
     listProjects,
     createProject,
+    setProjectMakeTool,
     removeProject,
     buildProject,
     onBuildLine,
@@ -39,6 +40,8 @@
   let location = $state<string | null>(null);
   let engine = $state("");
   let newTarget = $state("");
+  let makeTools = $state<string[]>([]);
+  let makeTool = $state("");
   let creating = $state(false);
   let error = $state<string | null>(null);
 
@@ -61,6 +64,20 @@
   // A same-arch target (e.g. <host>+sprt) is native and runnable; only a
   // different-arch triple is a true cross-compile that can't run here.
   const runnable = (p: Project) => targetOf(p).split("+")[0] === host;
+  // Current build tool for a project; legacy entries with none default to make.
+  const makeOf = (p: Project) => p.makeTool || makeTools[0] || "make";
+
+  // Switch a project's build tool: persists to the registry and rewrites its
+  // VS Code config server-side, then reflects the new value locally.
+  async function changeMake(p: Project, tool: string) {
+    if (tool === makeOf(p)) return;
+    try {
+      const updated = await setProjectMakeTool(p.path, tool);
+      projects = projects.map((x) => (x.path === p.path ? updated : x));
+    } catch (e) {
+      error = String(e);
+    }
+  }
 
   async function reload() {
     const [pj, en, tg, ed] = await Promise.all([
@@ -74,11 +91,17 @@
     targets = tg.targets;
     host = tg.host;
     hostInstalled = tg.hostInstalled;
+    makeTools = tg.makeTools;
     editors = ed;
     if (!engine && engines.length) engine = engines[0];
     // Default target = the host if it's installed, else the first available.
     if (!newTarget || !targets.includes(newTarget)) {
       newTarget = targets.includes(host) ? host : (targets[0] ?? "");
+    }
+    // Default build tool = first available (xlmake when both ship; the only one
+    // on Windows). Reset if the previous pick is no longer offered.
+    if (!makeTool || !makeTools.includes(makeTool)) {
+      makeTool = makeTools[0] ?? "";
     }
     loadSizes();
   }
@@ -124,7 +147,7 @@
     creating = true;
     error = null;
     try {
-      await createProject(location, name, engine, newTarget);
+      await createProject(location, name, engine, newTarget, makeTool);
       name = "";
       view = "list";
       await reload();
@@ -265,6 +288,14 @@
               {/each}
             </select>
           </label>
+          {#if makeTools.length > 1}
+            <label>
+              <span>{S["project-make-tool"]}</span>
+              <select bind:value={makeTool}>
+                {#each makeTools as m (m)}<option value={m}>{m}</option>{/each}
+              </select>
+            </label>
+          {/if}
           {#if projectPath}
             <p class="preview">→ {projectPath}</p>
           {/if}
@@ -320,6 +351,17 @@
             >
               {#each targets as t (t)}<option value={t}>{t}</option>{/each}
             </select>
+            {#if makeTools.length > 1}
+              <select
+                class="tsel msel"
+                value={makeOf(p)}
+                onchange={(e) => changeMake(p, e.currentTarget.value)}
+                disabled={!!buildingPath}
+                title={S["project-make-tool"]}
+              >
+                {#each makeTools as m (m)}<option value={m}>{m}</option>{/each}
+              </select>
+            {/if}
             <button
               class="btn primary"
               onclick={() => build(p, true)}

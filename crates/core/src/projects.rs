@@ -22,6 +22,10 @@ pub struct Project {
     /// host at build time.
     #[serde(default)]
     pub target: String,
+    /// Build tool driving the project's Makefile (`make` or `xlmake`). Empty in
+    /// legacy entries → treated as `make` at build time.
+    #[serde(default)]
+    pub make_tool: String,
     pub created_at: String,
 }
 
@@ -86,6 +90,31 @@ pub fn installed_targets(layout: &Layout) -> Vec<String> {
     list_subdirs(&layout.toolchains_store_dir().join("targets"))
 }
 
+/// Build tools that can drive a project's Makefile, in preference order (the
+/// first present is the default). Both ship in the host toolchain's `bin/`; the
+/// Windows toolchain ships only `xlmake`, so there the choice collapses to one.
+pub const MAKE_TOOLS: &[&str] = &["xlmake", "make"];
+
+/// The make-tool binaries present in the host toolchain `bin/`, in [`MAKE_TOOLS`]
+/// preference order. A tool may carry a `.exe` suffix on Windows.
+pub fn available_make_tools(host_bin: &Path) -> Vec<String> {
+    MAKE_TOOLS
+        .iter()
+        .filter(|t| host_bin.join(t).is_file() || host_bin.join(format!("{t}.exe")).is_file())
+        .map(|t| (*t).to_string())
+        .collect()
+}
+
+/// A make-tool binary name with the host OS's executable suffix (`xlmake` →
+/// `xlmake.exe` on Windows).
+pub fn make_binary_name(tool: &str) -> String {
+    if std::env::consts::OS == "windows" {
+        format!("{tool}.exe")
+    } else {
+        tool.to_string()
+    }
+}
+
 /// A valid project name: non-empty and make/path-safe (letters, digits, `-`,
 /// `_` — no spaces). It is used verbatim as both the folder and executable name.
 pub fn is_valid_name(name: &str) -> bool {
@@ -142,11 +171,19 @@ fn lf(s: &str) -> String {
 }
 
 /// Substitute the `{{…}}` placeholders shared by the project templates.
-fn render(tmpl: &str, engine_root: &Path, host_bin: &Path, host_triple: &str, exe: &str) -> String {
+fn render(
+    tmpl: &str,
+    engine_root: &Path,
+    host_bin: &Path,
+    host_triple: &str,
+    exe: &str,
+    make_bin: &str,
+) -> String {
     lf(&tmpl
         .replace("{{STAPPLER_ROOT}}", &make_path(engine_root))
         .replace("{{HOST_BIN}}", &make_path(host_bin))
         .replace("{{HOST_TRIPLE}}", host_triple)
+        .replace("{{MAKE_TOOL}}", make_bin)
         .replace("{{EXE}}", exe))
 }
 
@@ -182,6 +219,7 @@ pub fn scaffold(
     engine_root: &Path,
     host_triple: &str,
     host_bin: &Path,
+    make_tool: &str,
 ) -> std::io::Result<()> {
     if !engine_root.join("make/universal.mk").is_file() {
         return Err(std::io::Error::new(
@@ -201,23 +239,59 @@ pub fn scaffold(
     }
 
     let exe = sanitize_name(name);
+    // Empty (e.g. a legacy caller) → the historical default of GNU `make`.
+    let tool = if make_tool.is_empty() { "make" } else { make_tool };
+    let make_bin = make_binary_name(tool);
     let makefile = dir.join("Makefile");
     if !makefile.exists() {
         std::fs::write(
             &makefile,
-            render(MAKEFILE_TMPL, engine_root, host_bin, host_triple, &exe),
+            render(MAKEFILE_TMPL, engine_root, host_bin, host_triple, &exe, &make_bin),
         )?;
     }
 
+    write_vscode(dir, engine_root, host_triple, host_bin, &exe, &make_bin)
+}
+
+/// Write `.vscode/{launch,settings}.json` for the project. These files are fully
+/// generated (no user content), so regenerating them is safe — unlike `src/` and
+/// the `Makefile`, which `scaffold` never clobbers. `make_bin` is the build-tool
+/// binary name that drives `makefile.makePath`.
+fn write_vscode(
+    dir: &Path,
+    engine_root: &Path,
+    host_triple: &str,
+    host_bin: &Path,
+    exe: &str,
+    make_bin: &str,
+) -> std::io::Result<()> {
     let vscode = dir.join(".vscode");
     std::fs::create_dir_all(&vscode)?;
-    let binary = host_binary_rel(host_triple, &exe);
+    let binary = host_binary_rel(host_triple, exe);
     let render_vscode = |tmpl: &str| {
-        render(tmpl, engine_root, host_bin, host_triple, &exe).replace("{{BINARY_PATH}}", &binary)
+        render(tmpl, engine_root, host_bin, host_triple, exe, make_bin)
+            .replace("{{BINARY_PATH}}", &binary)
     };
     std::fs::write(vscode.join("launch.json"), render_vscode(LAUNCH_TMPL))?;
     std::fs::write(vscode.join("settings.json"), render_vscode(SETTINGS_TMPL))?;
     Ok(())
+}
+
+/// Switch an existing project's build tool: rewrite its `.vscode` config so VS
+/// Code's `makefile.makePath` points at `make_tool`. Leaves `src/` and the
+/// `Makefile` untouched (the Makefile is make-syntax, driven by whichever tool).
+pub fn set_make_tool(
+    dir: &Path,
+    name: &str,
+    engine_root: &Path,
+    host_triple: &str,
+    host_bin: &Path,
+    make_tool: &str,
+) -> std::io::Result<()> {
+    let exe = sanitize_name(name);
+    let tool = if make_tool.is_empty() { "make" } else { make_tool };
+    let make_bin = make_binary_name(tool);
+    write_vscode(dir, engine_root, host_triple, host_bin, &exe, &make_bin)
 }
 
 #[cfg(test)]
@@ -230,6 +304,7 @@ mod tests {
             path: PathBuf::from(path),
             engine: "master".into(),
             target: "aarch64-apple-macosx".into(),
+            make_tool: "make".into(),
             created_at: "2026-06-10T00:00:00Z".into(),
         }
     }
@@ -291,7 +366,7 @@ mod tests {
         fake_engine(&engine);
         let host_bin = Path::new("/x/toolchains/hosts/aarch64-apple-macosx/bin");
         let proj = dir.path().join("MyGame");
-        scaffold(&proj, "My Game", &engine, HOST, host_bin).unwrap();
+        scaffold(&proj, "My Game", &engine, HOST, host_bin, "xlmake").unwrap();
 
         let mk = std::fs::read_to_string(proj.join("Makefile")).unwrap();
         // Rendered paths are forward-slashed (make requires it; Windows-safe)…
@@ -312,6 +387,9 @@ mod tests {
         let settings = std::fs::read_to_string(proj.join(".vscode/settings.json")).unwrap();
         assert!(settings.contains(&format!("{}/clang-21", make_path(host_bin))));
         assert!(settings.contains(&format!("{}/lldb-dap", make_path(host_bin))));
+        // The chosen build tool drives `makefile.makePath` (xlmake here, not make).
+        assert!(settings.contains(&format!("\"makefile.makePath\": \"{}/xlmake\"", make_path(host_bin))));
+        assert!(!settings.contains("/make\""));
         // binaryPath is OS-specific; the common prefix is present on every OS.
         assert!(settings.contains(&format!("stappler-build/{HOST}/debug/cc/My_Game")));
         assert!(!settings.contains("{{"));
@@ -319,6 +397,31 @@ mod tests {
         assert!(launch.contains("lldb-dap"));
         assert!(launch.contains(&format!("stappler-build/{HOST}/debug/cc/My_Game")));
         assert!(!launch.contains("{{"));
+    }
+
+    #[test]
+    fn set_make_tool_rewrites_makepath_without_touching_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        fake_engine(&engine);
+        let host_bin = Path::new("/x/toolchains/hosts/aarch64-apple-macosx/bin");
+        let proj = dir.path().join("MyGame");
+        scaffold(&proj, "My Game", &engine, HOST, host_bin, "make").unwrap();
+
+        // Initially makePath uses `make`; user code is the vendored scene.
+        let settings0 = std::fs::read_to_string(proj.join(".vscode/settings.json")).unwrap();
+        assert!(settings0.contains(&format!("\"makefile.makePath\": \"{}/make\"", make_path(host_bin))));
+        std::fs::write(proj.join("src/ExampleScene.cpp"), b"// MY EDIT\n").unwrap();
+
+        // Switch to xlmake.
+        set_make_tool(&proj, "My Game", &engine, HOST, host_bin, "xlmake").unwrap();
+        let settings1 = std::fs::read_to_string(proj.join(".vscode/settings.json")).unwrap();
+        assert!(settings1.contains(&format!("\"makefile.makePath\": \"{}/xlmake\"", make_path(host_bin))));
+        // src/ is user-owned — must NOT be clobbered.
+        assert_eq!(
+            std::fs::read_to_string(proj.join("src/ExampleScene.cpp")).unwrap(),
+            "// MY EDIT\n"
+        );
     }
 
     #[test]
@@ -330,6 +433,7 @@ mod tests {
             Path::new("/no/engine"),
             HOST,
             Path::new("/b"),
+            "make",
         )
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
@@ -343,8 +447,30 @@ mod tests {
         let proj = dir.path().join("p");
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join("Makefile"), b"custom").unwrap();
-        scaffold(&proj, "x", &engine, HOST, Path::new("/b")).unwrap();
+        scaffold(&proj, "x", &engine, HOST, Path::new("/b"), "make").unwrap();
         assert_eq!(std::fs::read(proj.join("Makefile")).unwrap(), b"custom");
+    }
+
+    #[test]
+    fn detects_available_make_tools_in_preference_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path();
+        // Nothing yet.
+        assert!(available_make_tools(bin).is_empty());
+        // Only make → no choice, just make.
+        std::fs::write(bin.join("make"), b"#!/bin/sh\n").unwrap();
+        assert_eq!(available_make_tools(bin), vec!["make"]);
+        // Both → xlmake first (preferred default), then make.
+        std::fs::write(bin.join("xlmake"), b"#!/bin/sh\n").unwrap();
+        assert_eq!(available_make_tools(bin), vec!["xlmake", "make"]);
+    }
+
+    #[test]
+    fn make_binary_name_is_plain_off_windows() {
+        // Tests run on the host OS; off Windows there is no `.exe` suffix.
+        if std::env::consts::OS != "windows" {
+            assert_eq!(make_binary_name("xlmake"), "xlmake");
+        }
     }
 
     #[test]

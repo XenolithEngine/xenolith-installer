@@ -107,6 +107,38 @@ export async function onInstallProgress(
   return listen<InstallProgress>("install://progress", (e) => cb(e.payload));
 }
 
+// ---- self-update (Tauri updater) ----
+
+export interface UpdateInfo {
+  version: string;
+  currentVersion: string;
+  notes?: string | null;
+  date?: string | null;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}
+
+/** Check GitHub releases for a newer signed build. null = up to date. */
+export async function checkUpdate(): Promise<UpdateInfo | null> {
+  if (!inTauri) return null;
+  return invoke<UpdateInfo | null>("check_update");
+}
+
+/** Download + verify + install the update, then relaunch (does not return). */
+export async function installUpdate(): Promise<void> {
+  await invoke("install_update");
+}
+
+export async function onUpdateProgress(
+  cb: (p: UpdateProgress) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri) return () => {};
+  return listen<UpdateProgress>("update://progress", (e) => cb(e.payload));
+}
+
 // ---- projects ----
 
 export interface Project {
@@ -114,6 +146,7 @@ export interface Project {
   path: string;
   engine: string;
   target: string;
+  makeTool: string;
   createdAt: string;
 }
 
@@ -126,11 +159,18 @@ export interface Targets {
   targets: string[];
   host: string;
   hostInstalled: boolean;
+  /** Build tools available in the host toolchain (preference order). */
+  makeTools: string[];
 }
 
 export async function projectTargets(): Promise<Targets> {
   if (!inTauri) {
-    return { targets: ["aarch64-apple-macosx"], host: "aarch64-apple-macosx", hostInstalled: true };
+    return {
+      targets: ["aarch64-apple-macosx"],
+      host: "aarch64-apple-macosx",
+      hostInstalled: true,
+      makeTools: ["xlmake", "make"],
+    };
   }
   return invoke<Targets>("project_targets");
 }
@@ -145,11 +185,16 @@ export async function createProject(
   name: string,
   engine: string,
   target: string,
+  makeTool: string,
 ): Promise<Project> {
   if (!inTauri) {
-    return { name, path: `${location}/${name}`, engine, target, createdAt: "now" };
+    return { name, path: `${location}/${name}`, engine, target, makeTool, createdAt: "now" };
   }
-  return invoke<Project>("create_project", { location, name, engine, target });
+  return invoke<Project>("create_project", { location, name, engine, target, makeTool });
+}
+
+export async function setProjectMakeTool(path: string, makeTool: string): Promise<Project> {
+  return invoke<Project>("set_project_make_tool", { path, makeTool });
 }
 
 export async function removeProject(path: string): Promise<void> {

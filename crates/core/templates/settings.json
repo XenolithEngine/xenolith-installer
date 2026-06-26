@@ -8,7 +8,7 @@
   ],
   "debug.allowBreakpointsEverywhere": true,
   "makefile.makefilePath": "Makefile",
-  "makefile.makePath": "{{HOST_BIN}}/make",
+  "makefile.makePath": "{{HOST_BIN}}/{{MAKE_TOOL}}",
   "makefile.configurations": [
     {
       "name": "Xenolith",
