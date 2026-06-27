@@ -288,10 +288,9 @@
               {/each}
             </select>
           </label>
-          <!-- PARKED: build-tool selector. Projects use the platform default for
-               now (make on macOS/Linux, xlmake on Windows). Revive by restoring
-               `makeTools.length > 1`. -->
-          {#if false && makeTools.length > 1}
+          <!-- Build-tool selector: shown only when the host ships >1 tool
+               (make + xlmake). Windows has only xlmake → no selector. -->
+          {#if makeTools.length > 1}
             <label>
               <span>{S["project-make-tool"]}</span>
               <select bind:value={makeTool}>
@@ -354,8 +353,8 @@
             >
               {#each targets as t (t)}<option value={t}>{t}</option>{/each}
             </select>
-            <!-- PARKED: per-project build-tool switcher (see create form above). -->
-            {#if false && makeTools.length > 1}
+            <!-- Per-project build-tool switcher (shown only when >1 tool). -->
+            {#if makeTools.length > 1}
               <select
                 class="tsel msel"
                 value={makeOf(p)}

@@ -938,14 +938,15 @@ fn create_project(
         return Err(format!("target '{target}' is not installed"));
     }
     let host_bin = install::component_dir(&layout, Kind::Host, &host).join("bin");
-    // Build-tool selection is PARKED for now: always use the platform default
-    // (xlmake on Windows, make elsewhere). The UI no longer sends a real choice.
-    let _ = make_tool; // (parked) requested tool is ignored
-    let make_tool = projects::default_make_tool().to_string();
-    /* parked: validate a user-chosen tool against the host toolchain
+    // Validate the chosen build tool against what the host toolchain actually
+    // ships; default to the first available (make, or xlmake on Windows) if the
+    // UI sent nothing.
     let available = projects::available_make_tools(&host_bin);
     let make_tool = if make_tool.is_empty() {
-        available.first().cloned().unwrap_or_else(|| "make".into())
+        available
+            .first()
+            .cloned()
+            .unwrap_or_else(|| projects::default_make_tool().to_string())
     } else if available.iter().any(|t| t == &make_tool) {
         make_tool
     } else {
@@ -953,7 +954,6 @@ fn create_project(
             "build tool '{make_tool}' is not in the host toolchain"
         ));
     };
-    */
     // The project lives in a new folder named after the project, inside `location`.
     let path = std::path::Path::new(&location).join(&name);
     projects::scaffold(&path, &name, &engine_root, &host, &host_bin, &make_tool)
@@ -1527,8 +1527,7 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
     // On Windows also guarantee PowerShell is on PATH: the engine's build recipes
     // (buildconfig, shaders) are PowerShell-only, and `make` falls back to cmd.exe
     // if it can't locate `powershell.exe`, which silently breaks them.
-    // Clone: `host_bin` is reused below for the parked-tool self-heal.
-    let mut path_dirs: Vec<std::path::PathBuf> = vec![host_bin.clone()];
+    let mut path_dirs: Vec<std::path::PathBuf> = vec![host_bin];
     #[cfg(target_os = "windows")]
     let powershell_exe = {
         let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
@@ -1562,37 +1561,15 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
 
     // STAPPLER_ROOT must use forward slashes: this env value overrides the
     // Makefile's default, and GNU make breaks on Windows backslash paths.
-    // Build-tool selection is PARKED: always use the platform default (make on
-    // macOS/Linux, xlmake on Windows), ignoring whatever the project recorded —
-    // older projects may carry `xlmake` from the now-disabled selector. Self-heal
-    // such a project so its VS Code makePath and registry record agree. Resolves
-    // via PATH (host `bin/` prepended above); on Windows `Command` appends `.exe`.
-    let tool = projects::default_make_tool();
-    if project.make_tool != tool {
-        log::info!(
-            "migrating project build tool {} -> {tool}",
-            project.make_tool
-        );
-        let _ = projects::set_make_tool(
-            std::path::Path::new(path),
-            &project.name,
-            &engine_root,
-            &host,
-            &host_bin,
-            tool,
-        );
-        let pp = projects_path(&layout);
-        if let Ok(mut reg) = ProjectRegistry::load(&pp) {
-            if let Some(p) = reg
-                .projects
-                .iter_mut()
-                .find(|p| p.path.to_str() == Some(path))
-            {
-                p.make_tool = tool.to_string();
-                let _ = reg.save(&pp);
-            }
-        }
-    }
+    // Drive the build with the tool the project was created with (`make`/`xlmake`),
+    // matching the VS Code `makefile.makePath`. Legacy/empty entries fall back to
+    // the platform default. Resolves via PATH (host `bin/` prepended above); on
+    // Windows `Command` appends `.exe`.
+    let tool = if project.make_tool.is_empty() {
+        projects::default_make_tool()
+    } else {
+        project.make_tool.as_str()
+    };
     let mut make = std::process::Command::new(tool);
     make.current_dir(path)
         .arg(format!("-j{jobs}"))

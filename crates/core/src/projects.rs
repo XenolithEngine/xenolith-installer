@@ -90,12 +90,8 @@ pub fn installed_targets(layout: &Layout) -> Vec<String> {
     list_subdirs(&layout.toolchains_store_dir().join("targets"))
 }
 
-/// The build tool to use by default on this host: `xlmake` on Windows (the
-/// Windows toolchain ships no GNU `make`), `make` everywhere else.
-///
-/// The per-project build-tool *selector* is parked for now — projects always use
-/// this platform default. The selection plumbing ([`available_make_tools`],
-/// [`set_make_tool`], the UI selectors) is kept but unused so it can be revived.
+/// The build tool to use when a project records none (legacy/empty): `xlmake` on
+/// Windows (the Windows toolchain ships no GNU `make`), `make` everywhere else.
 pub fn default_make_tool() -> &'static str {
     if std::env::consts::OS == "windows" {
         "xlmake"
@@ -104,10 +100,11 @@ pub fn default_make_tool() -> &'static str {
     }
 }
 
-/// Build tools that can drive a project's Makefile, in preference order (the
-/// first present is the default). Both ship in the host toolchain's `bin/`; the
-/// Windows toolchain ships only `xlmake`, so there the choice collapses to one.
-pub const MAKE_TOOLS: &[&str] = &["xlmake", "make"];
+/// Build tools that can drive a project's Makefile, in preference order — the
+/// first one present is the selector's default (GNU `make`, then `xlmake`). Both
+/// ship in the host toolchain's `bin/`; the Windows toolchain ships only `xlmake`,
+/// so there the choice collapses to one (no selector).
+pub const MAKE_TOOLS: &[&str] = &["make", "xlmake"];
 
 /// The make-tool binaries present in the host toolchain `bin/`, in [`MAKE_TOOLS`]
 /// preference order. A tool may carry a `.exe` suffix on Windows.
@@ -495,12 +492,12 @@ mod tests {
         let bin = dir.path();
         // Nothing yet.
         assert!(available_make_tools(bin).is_empty());
-        // Only make → no choice, just make.
-        std::fs::write(bin.join("make"), b"#!/bin/sh\n").unwrap();
-        assert_eq!(available_make_tools(bin), vec!["make"]);
-        // Both → xlmake first (preferred default), then make.
+        // Only xlmake (the Windows case) → no choice, just xlmake.
         std::fs::write(bin.join("xlmake"), b"#!/bin/sh\n").unwrap();
-        assert_eq!(available_make_tools(bin), vec!["xlmake", "make"]);
+        assert_eq!(available_make_tools(bin), vec!["xlmake"]);
+        // Both → make first (the default), then xlmake.
+        std::fs::write(bin.join("make"), b"#!/bin/sh\n").unwrap();
+        assert_eq!(available_make_tools(bin), vec!["make", "xlmake"]);
     }
 
     #[test]
