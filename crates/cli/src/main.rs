@@ -55,8 +55,38 @@ enum Sub {
     Detect,
     /// List the catalogue with install status.
     List,
-    /// Install a component by id (triple, optionally with `+variant`).
-    Install { id: String },
+    /// Install by id: `engine` for just the engine bundle, a triple for one
+    /// toolchain component — or, with NO id, provision the whole SDK for this
+    /// machine (engine + native host toolchain + native target + `+sprt`).
+    Install {
+        /// `engine`, or a target/host triple. Omit to provision the whole system.
+        id: Option<String>,
+        /// Install the HOST toolchain for the triple (it may be both host and target).
+        #[arg(long)]
+        host: bool,
+        /// Install the TARGET sysroot for the triple.
+        #[arg(long)]
+        target: bool,
+    },
+    /// Scaffold a new project named <name> (in --path, default: current dir).
+    New {
+        /// Project name (letters, digits, '-' or '_').
+        name: String,
+        /// Parent directory to create the project in.
+        #[arg(long, default_value = ".")]
+        path: String,
+    },
+    /// Build a project directory, optionally running it afterwards.
+    Build {
+        /// Path to the project (the folder with its Makefile).
+        path: String,
+        /// Build target triple (default: the native host).
+        #[arg(long)]
+        target: Option<String>,
+        /// Run the built binary afterwards (native targets only).
+        #[arg(long)]
+        run: bool,
+    },
     /// Validate the installed-state registry against the filesystem.
     Verify,
     /// Show components for which a newer release exists.
@@ -70,7 +100,12 @@ impl From<Sub> for Command {
         match s {
             Sub::Detect => Command::Detect,
             Sub::List => Command::List,
-            Sub::Install { id } => Command::Install { id },
+            Sub::Install { id, host, target } => Command::Install { id, host, target },
+            Sub::New { name, path } => Command::New {
+                name,
+                location: path,
+            },
+            Sub::Build { path, target, run } => Command::Build { path, target, run },
             Sub::Verify => Command::Verify,
             Sub::Update => Command::Update,
             // Intercepted in `main` before dispatch (it needs no FTP/key context).

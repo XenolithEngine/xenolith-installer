@@ -2,6 +2,13 @@
 
 Cross-platform installer for the **Xenolith Engine SDK** — install the toolchains, download the engine, and create / build / run graphical projects, all from one app.
 
+### What's new in 0.1.4
+
+- **The CLI now does the whole flow, headless.** On a server or over SSH, no display needed:
+  `xenolith-installer-cli install` provisions everything for the machine (engine + host toolchain + native target + `+sprt`), then `new` scaffolds a project and `build … --run` builds and launches it.
+- **Fixed a macOS launch crash** (`dyld: liblzma.5.dylib not loaded`, issue #1): the binaries no longer depend on a Homebrew-installed `xz` — liblzma is statically linked, so they run out of the box.
+- **`list` now explains an empty catalogue** (e.g. when a network blocks the FTP source) instead of showing empty headers.
+
 ### Downloads
 
 | Platform | File |

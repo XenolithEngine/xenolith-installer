@@ -1,0 +1,11 @@
+# Statically link liblzma instead of a system/Homebrew one.
+#
+# Toolchain archives are `.tar.xz`, so `xz2` (crates/core) pulls in `lzma-sys`.
+# On the CI macOS runner lzma-sys finds Homebrew's liblzma via pkg-config and
+# links it DYNAMICALLY, so release binaries reference
+# `/opt/homebrew/opt/xz/lib/liblzma.5.dylib` — which doesn't exist on users'
+# Macs and aborts at launch (issue #1). LZMA_API_STATIC makes lzma-sys build its
+# vendored liblzma from source and link it statically, so binaries are
+# self-contained on every platform.
+[env]
+LZMA_API_STATIC = "1"

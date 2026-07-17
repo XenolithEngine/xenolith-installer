@@ -38,16 +38,40 @@ crates/
 | `catalog`    | Diff remote vs installed → per-component status for the package table. |
 | `i18n`       | Fluent catalogues shared by CLI and GUI; locale resolution with English fallback. |
 
-## CLI
+## CLI Quickstart
+
+From nothing to a running Vulkan window in **three copy-paste commands** — no paths
+or flags to figure out (`new` and `build` default to the current directory):
 
 ```sh
-xenolith-installer detect                 # native host triple
-xenolith-installer list                   # catalogue with install status
-xenolith-installer install <triple>       # e.g. x86_64-unknown-linux-gnu
-xenolith-installer verify                 # validate the install registry
-xenolith-installer update                 # components with a newer release
+xenolith-installer-cli install            # download the SDK for this machine (engine + toolchains)
+xenolith-installer-cli new myapp          # scaffold ./myapp
+xenolith-installer-cli build myapp --run  # build ./myapp and launch it
+```
 
-# Global: --lang <en|ru>  --prefix <dir>  --server host:port  --release <id>
+`build` takes the project **folder name** (or any path): run the three commands from
+the same directory and `build myapp` finds `./myapp`. That's the whole loop — provision
+once, then `new` + `build --run` per project.
+
+## CLI
+
+The CLI is a full headless SDK manager (no GTK/WebKit — it runs on servers and over
+SSH). Individual commands:
+
+```sh
+xenolith-installer-cli detect                    # native host triple
+xenolith-installer-cli list                      # catalogue with install status
+xenolith-installer-cli install engine            # just the engine bundle (no toolchains)
+xenolith-installer-cli install <triple>          # one component (sole match by id)
+xenolith-installer-cli install <triple> --host   # the host toolchain for <triple>
+xenolith-installer-cli install <triple> --target # the target sysroot for <triple>
+xenolith-installer-cli new <name> [--path <dir>] # scaffold a project (default: cwd)
+xenolith-installer-cli build <path> [--target <triple>] [--run]
+xenolith-installer-cli verify                    # validate the install registry
+xenolith-installer-cli update                    # components with a newer release
+xenolith-installer-cli self-update               # replace this binary with the latest release
+
+# Global: --lang <en|ru|zh>  --prefix <dir>  --server host:port  --release <id>
 ```
 
 Installs are verified by default and **fail closed** without a pinned signing

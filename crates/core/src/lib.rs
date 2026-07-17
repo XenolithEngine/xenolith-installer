@@ -17,6 +17,8 @@ pub mod install;
 pub mod key_source;
 pub mod manifest;
 pub mod projects;
+#[cfg(feature = "engine")]
+pub mod provision;
 pub mod releases;
 pub mod state;
 pub mod transport;

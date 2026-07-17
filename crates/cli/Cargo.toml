@@ -12,7 +12,7 @@ name = "xenolith-installer-cli"
 path = "src/main.rs"
 
 [dependencies]
-xenolith-installer-core = { path = "../core", features = ["ftp", "keyserver"] }
+xenolith-installer-core = { path = "../core", features = ["ftp", "keyserver", "engine"] }
 clap = { version = "4", features = ["derive"] }
 thiserror.workspace = true
 time = { version = "0.3", features = ["formatting"] }
