@@ -13,12 +13,46 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use xenolith_installer_core::{
     dirs::Layout,
     i18n::I18n,
-    key_source,
+    key_source, releases,
     transport_ftp::FtpTransport,
     verify::{AcceptAll, PgpVerifier, RejectAll, Verifier},
 };
 
 use commands::{run, Command, Ctx};
+
+/// Parent directory under which each release (`sdk-v…`) lives on the server.
+const RELEASES_ROOT: &str = "/releases";
+/// Last-resort release when discovery fails (offline / blocked listing).
+const FALLBACK_RELEASE: &str = "sdk-v0alpha0";
+
+/// Resolve the remote base dir and release name. Explicit `--base`/`--release` win;
+/// otherwise **discover the latest release on the server** (like the GUI) so the CLI
+/// never gets stuck on a stale hardcoded release.
+fn resolve_base_release(
+    transport: &FtpTransport,
+    base: Option<String>,
+    release: Option<String>,
+) -> (String, String) {
+    match (base, release) {
+        (Some(b), Some(r)) => (b, r),
+        (None, Some(r)) => (format!("{RELEASES_ROOT}/{r}"), r),
+        (Some(b), None) => {
+            let r = b
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or(&b)
+                .to_string();
+            (b, r)
+        }
+        (None, None) => match releases::latest_release(transport, RELEASES_ROOT, 4) {
+            Ok(Some(rel)) => (rel.base(RELEASES_ROOT), rel.name),
+            _ => (
+                format!("{RELEASES_ROOT}/{FALLBACK_RELEASE}"),
+                FALLBACK_RELEASE.to_string(),
+            ),
+        },
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -36,12 +70,12 @@ struct Cli {
     /// Release server `host:port`.
     #[arg(long, global = true, default_value = "stappler.dev:21")]
     server: String,
-    /// Remote directory holding `hosts/` and `targets/`.
-    #[arg(long, global = true, default_value = "/releases/sdk-v0alpha0")]
-    base: String,
-    /// Release identifier.
-    #[arg(long, global = true, default_value = "sdk-v0alpha0")]
-    release: String,
+    /// Remote directory holding `hosts/` and `targets/` (default: the latest release).
+    #[arg(long, global = true)]
+    base: Option<String>,
+    /// Release identifier (default: the latest release discovered on the server).
+    #[arg(long, global = true)]
+    release: Option<String>,
     /// DEV ONLY: skip signature verification. Never use for real installs.
     #[arg(long, global = true)]
     insecure_accept_unsigned: bool,
@@ -193,13 +227,30 @@ fn main() -> ExitCode {
         .format(&Rfc3339)
         .unwrap_or_else(|_| "unknown".to_string());
 
+    // Only the catalogue commands hit the release; resolve it (discovering the
+    // latest release when not overridden) just for those to avoid a needless FTP
+    // listing on `detect`/`new`/`build`/`verify`.
+    let (remote_base, release) =
+        if matches!(cli.command, Sub::List | Sub::Install { .. } | Sub::Update) {
+            resolve_base_release(&transport, cli.base.clone(), cli.release.clone())
+        } else {
+            (
+                cli.base
+                    .clone()
+                    .unwrap_or_else(|| format!("{RELEASES_ROOT}/{FALLBACK_RELEASE}")),
+                cli.release
+                    .clone()
+                    .unwrap_or_else(|| FALLBACK_RELEASE.into()),
+            )
+        };
+
     let ctx = Ctx {
         transport: &transport,
         verifier: verifier.as_ref(),
         layout,
         i18n,
-        remote_base: cli.base.clone(),
-        release: cli.release.clone(),
+        remote_base,
+        release,
         now,
         arch: std::env::consts::ARCH.to_string(),
         os: std::env::consts::OS.to_string(),

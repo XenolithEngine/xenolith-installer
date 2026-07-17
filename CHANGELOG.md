@@ -4,7 +4,7 @@ All notable changes to the Xenolith Installer are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0
 (alpha), so layouts and interfaces may still change between releases.
 
-## [0.1.4] — unreleased
+## [0.1.4] — 2026-07-17
 
 ### Added
 - **Headless CLI parity with the GUI** — the CLI can now take a machine from zero
@@ -24,11 +24,21 @@ follows [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0
   ([#1]). The CLI/GUI dynamically linked Homebrew's liblzma from the CI build
   machine, which users don't have. liblzma is now **statically linked**
   (`LZMA_API_STATIC`), so the binaries are self-contained — no Homebrew needed.
+- **CLI was pinned to a stale release.** `--release`/`--base` defaulted to a
+  hardcoded `sdk-v0alpha0` instead of discovering the latest release like the GUI,
+  so `list` compared against an old catalogue and could show a nonsensical
+  "update available: sdk-v0alpha0" for a component already on the newer release.
+  The CLI now resolves the latest release on the server automatically.
 - **`list` showed bare, empty group headers** when the catalogue fetch came back
   empty (most often plain-FTP being blocked/mangled by the user's network). It now
   reports that clearly instead of looking like "nothing to install".
 - README CLI examples referenced `xenolith-installer` instead of the real
   `xenolith-installer-cli` binary name.
+
+### Documentation
+- Added a **macOS CLI first-launch** note: a downloaded, unsigned CLI binary is
+  quarantined and killed on launch (`zsh: killed`). Clear it once with
+  `xattr -d com.apple.quarantine ./xenolith-installer-cli`.
 
 ### Known limitations
 - Builds are still **unsigned** (Apple notarization / Windows signing is a
@@ -38,6 +48,6 @@ follows [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0
 ## [0.1.3] and earlier
 See the [GitHub releases] for prior history.
 
-[0.1.4]: https://github.com/XenolithEngine/xenolith-installer/releases
+[0.1.4]: https://github.com/XenolithEngine/xenolith-installer/releases/tag/v0.1.4
 [GitHub releases]: https://github.com/XenolithEngine/xenolith-installer/releases
 [#1]: https://github.com/XenolithEngine/xenolith-installer/issues/1

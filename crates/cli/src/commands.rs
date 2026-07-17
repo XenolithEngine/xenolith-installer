@@ -494,9 +494,15 @@ fn run_built(proj: &std::path::Path, target: &str) -> Result<String, CliError> {
         .iter()
         .find(|p| p.exists())
         .ok_or_else(|| CliError::Other("built binary not found".into()))?;
+    // `Command` with a RELATIVE program path AND `current_dir` is ambiguous — the
+    // exec resolves the program against the NEW cwd, so a relative exe that already
+    // contains the project prefix gets it applied twice ("No such file"). Use
+    // absolute paths for both the program and the working directory.
+    let exe = std::fs::canonicalize(exe).map_err(|e| CliError::Other(e.to_string()))?;
+    let cwd = std::fs::canonicalize(proj).unwrap_or_else(|_| proj.to_path_buf());
     eprintln!("▶ running {}", exe.display());
-    let status = std::process::Command::new(exe)
-        .current_dir(proj)
+    let status = std::process::Command::new(&exe)
+        .current_dir(&cwd)
         .status()
         .map_err(|e| CliError::Other(e.to_string()))?;
     Ok(format!(
