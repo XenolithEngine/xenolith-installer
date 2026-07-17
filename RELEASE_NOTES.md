@@ -28,7 +28,16 @@ Cross-platform installer for the **Xenolith Engine SDK** — install the toolcha
 | **Windows** (x64) | `xenolith-installer-cli-x86_64-pc-windows-msvc.tar.gz` |
 | **Linux** (x64) | `xenolith-installer-cli-x86_64-unknown-linux-gnu.tar.gz` |
 
-Unpack (`tar -xzf …`), then see the CLI first-launch note below (macOS quarantine).
+Set it up once, then it works from anywhere as `xenolith-installer-cli`:
+
+```sh
+tar -xzf xenolith-installer-cli-*.tar.gz          # unpack
+xattr -d com.apple.quarantine xenolith-installer-cli   # macOS only: clear quarantine
+chmod +x xenolith-installer-cli
+sudo mv xenolith-installer-cli /usr/local/bin/    # put it on your PATH
+```
+
+(Or skip the `mv` and run it in place as `./xenolith-installer-cli …`.)
 
 ### First launch (the builds are unsigned for now)
 

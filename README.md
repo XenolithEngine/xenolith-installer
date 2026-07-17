@@ -40,6 +40,10 @@ crates/
 
 ## CLI Quickstart
 
+> Downloaded the CLI tarball? Put the binary on your `PATH` first
+> (`sudo mv xenolith-installer-cli /usr/local/bin/`), or run it in place as
+> `./xenolith-installer-cli`. The commands below assume it's on your `PATH`.
+
 From nothing to a running Vulkan window in **three copy-paste commands** — no paths
 or flags to figure out (`new` and `build` default to the current directory):
 
