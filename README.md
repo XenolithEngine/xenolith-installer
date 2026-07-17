@@ -40,18 +40,26 @@ crates/
 
 ## CLI Quickstart
 
-> Downloaded the CLI tarball? Put the binary on your `PATH` first
-> (`sudo mv xenolith-installer-cli /usr/local/bin/`), or run it in place as
-> `./xenolith-installer-cli`. The commands below assume it's on your `PATH`.
+**Install the CLI** (macOS / Linux) — grabs the right binary for your platform and
+puts it on your `PATH`:
 
-From nothing to a running Vulkan window in **three copy-paste commands** — no paths
-or flags to figure out (`new` and `build` default to the current directory):
+```sh
+curl -fsSL https://raw.githubusercontent.com/XenolithEngine/xenolith-installer/main/install.sh | sh
+```
+
+Then, from nothing to a running Vulkan window in **three commands** (`new` and
+`build` default to the current directory — no paths to figure out):
 
 ```sh
 xenolith-installer-cli install            # download the SDK for this machine (engine + toolchains)
 xenolith-installer-cli new myapp          # scaffold ./myapp
 xenolith-installer-cli build myapp --run  # build ./myapp and launch it
 ```
+
+> Prefer to install by hand? Download the CLI tarball from the
+> [Releases](https://github.com/XenolithEngine/xenolith-installer/releases) page,
+> unpack it, then `sudo mv xenolith-installer-cli /usr/local/bin/` (or run it in
+> place as `./xenolith-installer-cli`). On Windows, download the `.exe`.
 
 `build` takes the project **folder name** (or any path): run the three commands from
 the same directory and `build myapp` finds `./myapp`. That's the whole loop — provision

@@ -187,6 +187,12 @@ jobs:
             EXT=""; [[ "$T" == *windows* ]] && EXT=".exe"
             tar -C "target/$T/release" -czf "dist-cli/xenolith-installer-cli-$T.tar.gz" "xenolith-installer-cli${EXT}"
           done
+          # Checksums for `install.sh` to verify each download (portable: sha256sum
+          # on Linux/Git-Bash, shasum on macOS).
+          sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
+          for f in dist-cli/*.tar.gz; do
+            ( cd dist-cli && sha256 "$(basename "$f")" > "$(basename "$f").sha256" )
+          done
 
       - name: Upload CLI to the release (tag)
         if: github.ref_type == 'tag'
@@ -199,9 +205,10 @@ jobs:
           up="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets"
           for f in dist-cli/*; do
             name=$(basename "$f")
+            case "$name" in *.sha256) ct="text/plain" ;; *) ct="application/gzip" ;; esac
             echo "uploading $name"
             gh api --method POST "$up?name=$name" \
-              -H "Content-Type: application/gzip" \
+              -H "Content-Type: $ct" \
               --input "$f" >/dev/null
           done
 

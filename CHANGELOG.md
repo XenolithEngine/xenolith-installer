@@ -18,6 +18,9 @@ follows [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0
     `.clang-format` and `.vscode/` (clangd + lldb-dap), identical to the GUI.
   - `build <path> [--target <triple>] [--run]` builds a project with the SDK
     toolchain and optionally runs the result.
+- **One-line CLI installer** (`install.sh`): `curl -fsSL …/install.sh | sh` picks
+  the right binary for the platform, clears the macOS quarantine flag, and puts it
+  on `PATH`.
 
 ### Fixed
 - **macOS: binaries crashed with `dyld: Library not loaded … liblzma.5.dylib`**

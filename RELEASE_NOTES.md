@@ -2,6 +2,16 @@
 
 Cross-platform installer for the **Xenolith Engine SDK** — install the toolchains, download the engine, and create / build / run graphical projects, all from one app.
 
+### Install the CLI — one line (macOS / Linux)
+
+Downloads the right binary for your platform, verifies its checksum, and puts it on your `PATH`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/XenolithEngine/xenolith-installer/main/install.sh | sh
+```
+
+Then: `xenolith-installer-cli install` → `new myapp` → `build myapp --run`. (Desktop app and manual downloads are listed below.)
+
 ### What's new in 0.1.4
 
 - **The CLI now does the whole flow, headless.** On a server or over SSH, no display needed:
@@ -20,15 +30,21 @@ Cross-platform installer for the **Xenolith Engine SDK** — install the toolcha
 | **Windows** (x64) | `Xenolith Installer_*_x64-setup.exe` / `.msi` |
 | **Linux** (x64) | `*.AppImage` (portable) or `*.deb` |
 
-**Headless CLI** (`xenolith-installer-cli` — for servers, CI and SSH; same install/build features, no window):
+**Headless CLI** (`xenolith-installer-cli` — for servers, CI and SSH; same install/build features, no window).
+
+Easiest — one line (macOS / Linux); it picks the right binary and puts it on your PATH:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/XenolithEngine/xenolith-installer/main/install.sh | sh
+```
+
+Or download the tarball manually:
 
 | Platform | File |
 |----------|------|
 | **macOS** (Apple Silicon / Intel) | `xenolith-installer-cli-aarch64-apple-darwin.tar.gz` / `…-x86_64-apple-darwin.tar.gz` |
 | **Windows** (x64) | `xenolith-installer-cli-x86_64-pc-windows-msvc.tar.gz` |
 | **Linux** (x64) | `xenolith-installer-cli-x86_64-unknown-linux-gnu.tar.gz` |
-
-Set it up once, then it works from anywhere as `xenolith-installer-cli`:
 
 ```sh
 tar -xzf xenolith-installer-cli-*.tar.gz          # unpack
