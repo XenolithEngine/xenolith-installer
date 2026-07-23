@@ -12,13 +12,19 @@ curl -fsSL https://raw.githubusercontent.com/XenolithEngine/xenolith-installer/m
 
 Then: `xenolith-installer-cli install` → `new myapp` → `build myapp --run`. (Desktop app and manual downloads are listed below.)
 
-### What's new in 0.1.4
+### What's new in 0.1.5
 
-- **The CLI now does the whole flow, headless.** On a server or over SSH, no display needed:
-  `xenolith-installer-cli install` provisions everything for the machine (engine + host toolchain + native target + `+sprt`), then `new` scaffolds a project and `build … --run` builds and launches it.
-- **Fixed a macOS launch crash** (`dyld: liblzma.5.dylib not loaded`, issue #1): the binaries no longer depend on a Homebrew-installed `xz` — liblzma is statically linked, so they run out of the box.
-- **The CLI now tracks the latest release** automatically (it no longer defaults to a stale hardcoded release), so `list`/`install` always show the current catalogue.
-- **`list` now explains an empty catalogue** (e.g. when a network blocks the FTP source) instead of showing empty headers.
+- **The Linux CLI is now a static binary** — no system libraries at all. The previous
+  build linked glibc dynamically and needed GLIBC ≥ 2.34, so it refused to start on
+  Alpine, Ubuntu 20.04, Debian 11, RHEL 8 and most CI containers. The musl builds run
+  anywhere, which means `curl … | sh` now works inside a bare container.
+- **Linux ARM64 is now built** (`aarch64-unknown-linux-musl`). ARM servers, Raspberry-Pi-class
+  boards and ARM CI runners no longer have to compile the CLI from source — `install.sh`
+  picks the right binary automatically.
+
+Everything else is unchanged from 0.1.4, which brought the full headless CLI flow
+(`install` → `new` → `build … --run`), the macOS `liblzma` launch fix, and automatic
+tracking of the latest SDK release.
 
 ### Downloads
 
