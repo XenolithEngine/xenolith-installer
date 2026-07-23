@@ -44,7 +44,10 @@ Or download the tarball manually:
 |----------|------|
 | **macOS** (Apple Silicon / Intel) | `xenolith-installer-cli-aarch64-apple-darwin.tar.gz` / `…-x86_64-apple-darwin.tar.gz` |
 | **Windows** (x64) | `xenolith-installer-cli-x86_64-pc-windows-msvc.tar.gz` |
-| **Linux** (x64) | `xenolith-installer-cli-x86_64-unknown-linux-gnu.tar.gz` |
+| **Linux** (x64 / ARM64) | `xenolith-installer-cli-x86_64-unknown-linux-musl.tar.gz` / `…-aarch64-unknown-linux-musl.tar.gz` |
+
+The Linux builds are statically linked (musl), so they need no system libraries and
+run on any distro, including Alpine and minimal CI containers.
 
 ```sh
 tar -xzf xenolith-installer-cli-*.tar.gz          # unpack

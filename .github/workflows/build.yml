@@ -171,19 +171,42 @@ jobs:
       # ---- headless CLI: standalone binary for `xenolith-installer-cli self-update` ----
       # `self_update` matches the release asset whose name contains the host target
       # triple, so each tarball is named `xenolith-installer-cli-<triple>.tar.gz`.
+      #
+      # Linux ships **static musl** binaries. The old glibc-only build linked
+      # libc/libm/libgcc_s dynamically and required GLIBC >= 2.34, so it refused to
+      # start on Alpine, Ubuntu 20.04, Debian 11, RHEL 8 and most CI containers.
+      # musl links everything statically, so one binary runs on any distro and any
+      # container — that's what `install.sh` fetches. The gnu tarball stays for one
+      # release cycle so binaries installed before this change can still self-update.
+      - name: Install cross (Linux musl targets)
+        if: matrix.os == 'ubuntu-22.04'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
       - name: Build & package CLI
         shell: bash
         run: |
           set -euo pipefail
           case "${{ matrix.os }}" in
             macos-latest)   TARGETS="aarch64-apple-darwin x86_64-apple-darwin" ;;
-            ubuntu-22.04)   TARGETS="x86_64-unknown-linux-gnu" ;;
+            ubuntu-22.04)   TARGETS="x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-unknown-linux-gnu" ;;
             windows-latest) TARGETS="x86_64-pc-windows-msvc" ;;
           esac
           mkdir -p dist-cli
           for T in $TARGETS; do
-            rustup target add "$T"
-            cargo build -p xenolith-installer-cli --release --target "$T"
+            # musl needs a cross C toolchain — `lzma-sys` builds vendored liblzma from
+            # source (LZMA_API_STATIC in .cargo/config.toml). `cross` supplies it in a
+            # container; everything else compiles natively on the runner.
+            case "$T" in
+              *-linux-musl)
+                cross build -p xenolith-installer-cli --release --target "$T"
+                ;;
+              *)
+                rustup target add "$T"
+                cargo build -p xenolith-installer-cli --release --target "$T"
+                ;;
+            esac
             EXT=""; [[ "$T" == *windows* ]] && EXT=".exe"
             tar -C "target/$T/release" -czf "dist-cli/xenolith-installer-cli-$T.tar.gz" "xenolith-installer-cli${EXT}"
           done

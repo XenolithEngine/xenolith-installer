@@ -4,6 +4,21 @@ All notable changes to the Xenolith Installer are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0
 (alpha), so layouts and interfaces may still change between releases.
 
+## [0.1.5] — 2026-07-22
+
+### Added
+- **Linux ARM64 CLI builds** — `xenolith-installer-cli-aarch64-unknown-linux-musl.tar.gz`
+  is now published, so ARM servers and containers no longer have to build from source.
+
+### Changed
+- **Linux CLI binaries are now statically linked (musl).** The previous
+  `x86_64-unknown-linux-gnu` build linked `libc`/`libm`/`libgcc_s` dynamically and
+  required GLIBC ≥ 2.34, so it failed to start on Alpine, Ubuntu 20.04, Debian 11,
+  RHEL 8 and most CI containers. The musl builds carry no runtime dependencies and
+  run on any distro. `install.sh` now selects them, and also resolves `aarch64`.
+  The `…-x86_64-unknown-linux-gnu.tar.gz` asset is still published for one release
+  cycle so existing installs can `self-update`.
+
 ## [0.1.4] — 2026-07-17
 
 ### Added

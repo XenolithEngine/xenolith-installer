@@ -59,3 +59,8 @@ Then set these **repository secrets** (Settings → Secrets → Actions):
   `self_update` crate can pick the right one per host.
 - macOS is built universal for the GUI; the CLI is built for both
   `aarch64-apple-darwin` and `x86_64-apple-darwin`.
+- Linux CLI tarballs are **statically linked (musl)** for `x86_64-unknown-linux-musl`
+  and `aarch64-unknown-linux-musl`, so they carry no glibc floor and run on any
+  distro or container. They are cross-compiled with `cross`, which needs Docker on
+  the runner. `x86_64-unknown-linux-gnu` is still published so installs predating
+  0.1.5 can `self-update`; drop it once those have rolled over.

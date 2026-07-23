@@ -41,9 +41,12 @@ case "$os" in
 		esac
 		;;
 	Linux)
+		# Static musl builds: no glibc version floor, so the same binary runs on
+		# Alpine, old LTS distros and CI containers alike.
 		case "$arch" in
-			x86_64 | amd64) triple="x86_64-unknown-linux-gnu" ;;
-			*) err "unsupported Linux arch: $arch (only x86_64 for now)" ;;
+			x86_64 | amd64) triple="x86_64-unknown-linux-musl" ;;
+			aarch64 | arm64) triple="aarch64-unknown-linux-musl" ;;
+			*) err "unsupported Linux arch: $arch (x86_64 and aarch64 are built)" ;;
 		esac
 		;;
 	*)
