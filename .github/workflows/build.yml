@@ -172,41 +172,22 @@ jobs:
       # `self_update` matches the release asset whose name contains the host target
       # triple, so each tarball is named `xenolith-installer-cli-<triple>.tar.gz`.
       #
-      # Linux ships **static musl** binaries. The old glibc-only build linked
-      # libc/libm/libgcc_s dynamically and required GLIBC >= 2.34, so it refused to
-      # start on Alpine, Ubuntu 20.04, Debian 11, RHEL 8 and most CI containers.
-      # musl links everything statically, so one binary runs on any distro and any
-      # container — that's what `install.sh` fetches. The gnu tarball stays for one
-      # release cycle so binaries installed before this change can still self-update.
-      - name: Install cross (Linux musl targets)
-        if: matrix.os == 'ubuntu-22.04'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
+      # The static Linux (musl) binaries are built by the `linux-cli` job below;
+      # this one only covers macOS, Windows, and the legacy Linux glibc tarball.
       - name: Build & package CLI
         shell: bash
         run: |
           set -euo pipefail
           case "${{ matrix.os }}" in
             macos-latest)   TARGETS="aarch64-apple-darwin x86_64-apple-darwin" ;;
-            ubuntu-22.04)   TARGETS="x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-unknown-linux-gnu" ;;
+            # Kept for one release cycle so installs predating the musl switch can self-update.
+            ubuntu-22.04)   TARGETS="x86_64-unknown-linux-gnu" ;;
             windows-latest) TARGETS="x86_64-pc-windows-msvc" ;;
           esac
           mkdir -p dist-cli
           for T in $TARGETS; do
-            # musl needs a cross C toolchain — `lzma-sys` builds vendored liblzma from
-            # source (LZMA_API_STATIC in .cargo/config.toml). `cross` supplies it in a
-            # container; everything else compiles natively on the runner.
-            case "$T" in
-              *-linux-musl)
-                cross build -p xenolith-installer-cli --release --target "$T"
-                ;;
-              *)
-                rustup target add "$T"
-                cargo build -p xenolith-installer-cli --release --target "$T"
-                ;;
-            esac
+            rustup target add "$T"
+            cargo build -p xenolith-installer-cli --release --target "$T"
             EXT=""; [[ "$T" == *windows* ]] && EXT=".exe"
             tar -C "target/$T/release" -czf "dist-cli/xenolith-installer-cli-$T.tar.gz" "xenolith-installer-cli${EXT}"
           done
@@ -240,5 +221,91 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xenolith-cli-${{ matrix.os }}
+          path: dist-cli/*
+          if-no-files-found: warn
+
+  # ---- static Linux CLI (musl) -------------------------------------------------
+  # The glibc build required GLIBC >= 2.34, so it refused to start on Alpine,
+  # Ubuntu 20.04, Debian 11, RHEL 8 and most CI containers. musl links everything
+  # statically, so a single binary runs on any distro — that's what install.sh pulls.
+  #
+  # Built INSIDE a musl container, natively on a runner of the matching arch, so
+  # the whole toolchain (including the C compiler `lzma-sys` needs to build vendored
+  # liblzma) is musl. `cross` is deliberately not used: its 0.2.5 images ship
+  # glibc 2.23, too old to execute build scripts emitted by a current Rust.
+  linux-cli:
+    name: Linux CLI (${{ matrix.arch }}, static musl)
+    needs: create-release
+    if: ${{ always() && needs.create-release.result != 'failure' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-22.04-arm
+            arch: aarch64
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build static CLI in a musl container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD":/w -w /w -e CARGO_TARGET_DIR=/w/target-musl \
+            rust:alpine sh -c '
+              set -e
+              apk add --no-cache musl-dev build-base >/dev/null
+              rustc -vV | grep host
+              cargo build -p xenolith-installer-cli --release
+            '
+          sudo chown -R "$(id -u):$(id -g)" target-musl
+
+      - name: Verify the binary is static, then package
+        shell: bash
+        run: |
+          set -euo pipefail
+          T="${{ matrix.target }}"
+          bin=target-musl/release/xenolith-installer-cli
+          file "$bin"
+          # `file` words this differently per arch: x86_64 comes out "static-pie linked",
+          # aarch64 "statically linked". Assert on the negative instead — a dynamic
+          # interpreter is the thing we must never ship.
+          if file "$bin" | grep -q "dynamically linked"; then
+            echo "::error::$T build is dynamically linked — expected a static binary"; exit 1
+          fi
+          "$bin" --version
+          mkdir -p dist-cli
+          tar -C "$(dirname "$bin")" -czf "dist-cli/xenolith-installer-cli-$T.tar.gz" xenolith-installer-cli
+          ( cd dist-cli && sha256sum "xenolith-installer-cli-$T.tar.gz" > "xenolith-installer-cli-$T.tar.gz.sha256" )
+
+      - name: Upload CLI to the release (tag)
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          up="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets"
+          for f in dist-cli/*; do
+            name=$(basename "$f")
+            case "$name" in *.sha256) ct="text/plain" ;; *) ct="application/gzip" ;; esac
+            echo "uploading $name"
+            gh api --method POST "$up?name=$name" \
+              -H "Content-Type: $ct" \
+              --input "$f" >/dev/null
+          done
+
+      - name: Upload CLI as run artifacts (non-tag)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenolith-cli-linux-${{ matrix.arch }}
           path: dist-cli/*
           if-no-files-found: warn
