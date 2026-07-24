@@ -341,7 +341,7 @@ fn load_catalog_blocking() -> Result<CatalogDto, String> {
             .map_err(|e| e.to_string())?;
     let state = InstalledState::load(&layout.installed_manifest()).map_err(|e| e.to_string())?;
     let mut rows = build_catalog(&manifest, &state);
-    let native = triple::host_triple_from(std::env::consts::ARCH, std::env::consts::OS).ok();
+    let native = triple::native_host_triple(std::env::consts::ARCH, std::env::consts::OS).ok();
     if let Some(n) = &native {
         promote_native(&mut rows, n);
     }
@@ -869,7 +869,7 @@ fn list_projects() -> Result<Vec<ProjectDto>, String> {
 }
 
 fn native_host() -> Result<String, String> {
-    triple::host_triple_from(std::env::consts::ARCH, std::env::consts::OS)
+    triple::native_host_triple(std::env::consts::ARCH, std::env::consts::OS)
         .map_err(|e| e.to_string())
 }
 

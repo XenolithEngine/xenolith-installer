@@ -8,14 +8,23 @@
 
 use std::fmt;
 
-/// Host triples for which a host toolchain archive actually exists on the FTP
-/// (`/releases/<rel>/hosts/`). There is intentionally no `linux-arm64`,
-/// `win-arm64` or `macos-x64` host yet — see [`host_fallback`].
-pub const KNOWN_HOSTS: [&str; 4] = [
+/// Host triples for which a host toolchain archive exists on the FTP
+/// (`/releases/<rel>/hosts/`), mirroring the `sdk-v0beta1` host set. This is the
+/// OFFLINE fast-path used by `detect`; the authoritative list is the fetched
+/// manifest, which `install`/`provision` resolve against — so keep this in sync
+/// but never treat it as the source of truth (it has drifted twice already).
+/// `aarch64`/`riscv64` Windows have no native host and fall back — see
+/// [`host_fallback`].
+pub const KNOWN_HOSTS: &[&str] = &[
     "aarch64-apple-macosx",
     "x86_64-apple-macosx",
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "riscv64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "riscv64-unknown-linux-musl",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -26,12 +35,14 @@ pub enum TripleError {
     UnsupportedArch(String),
 }
 
-/// Map a Rust `std::env::consts::OS` value to the server's vendor-os segment.
-pub fn server_os(os: &str) -> Result<&'static str, TripleError> {
+/// Map a Rust `std::env::consts::OS` value (plus the Linux libc flavour) to the
+/// server's vendor-os segment. `libc` is consulted only for Linux
+/// (`Some("musl")` → `unknown-linux-musl`, otherwise `unknown-linux-gnu`).
+pub fn server_os(os: &str, libc: Option<&str>) -> Result<String, TripleError> {
     Ok(match os {
-        "macos" | "ios" => "apple-macosx",
-        "windows" => "pc-windows-msvc",
-        "linux" | "android" => "unknown-linux-gnu",
+        "macos" | "ios" => "apple-macosx".to_string(),
+        "windows" => "pc-windows-msvc".to_string(),
+        "linux" | "android" => format!("unknown-linux-{}", libc.unwrap_or("gnu")),
         other => return Err(TripleError::UnsupportedOs(other.to_string())),
     })
 }
@@ -46,21 +57,66 @@ pub fn server_arch(arch: &str) -> Result<&'static str, TripleError> {
     })
 }
 
-/// Build the server triple string for a given (arch, os) pair.
-///
-/// This is the pure core of detection — it does NOT look at the running
-/// process; callers pass in the *native* arch/os (see [`detect_host_triple`]).
+/// Build the server triple for an (arch, os) pair, defaulting Linux to glibc.
+/// Pure — for the libc-aware, machine-sensing version use [`native_host_triple`].
 pub fn host_triple_from(arch: &str, os: &str) -> Result<String, TripleError> {
-    Ok(format!("{}-{}", server_arch(arch)?, server_os(os)?))
+    host_triple_from_libc(arch, os, None)
+}
+
+/// Build the server triple for an (arch, os, libc) triple. Pure.
+pub fn host_triple_from_libc(
+    arch: &str,
+    os: &str,
+    libc: Option<&str>,
+) -> Result<String, TripleError> {
+    Ok(format!("{}-{}", server_arch(arch)?, server_os(os, libc)?))
+}
+
+/// The current machine's Linux libc (`"gnu"`/`"musl"`), or `None` off Linux.
+/// A glibc clang won't run on a musl-only box (Alpine) and vice-versa, so this
+/// decides which host toolchain the machine can actually execute.
+pub fn current_libc(os: &str) -> Option<&'static str> {
+    if os != "linux" {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Some(detect_linux_libc())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some("gnu")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_libc() -> &'static str {
+    use std::path::Path;
+    // musl installs its dynamic loader as /lib/ld-musl-<arch>.so.1 and Alpine
+    // adds /etc/alpine-release; a glibc system has neither.
+    let musl = Path::new("/lib/ld-musl-aarch64.so.1").exists()
+        || Path::new("/lib/ld-musl-x86_64.so.1").exists()
+        || Path::new("/lib/ld-musl-riscv64.so.1").exists()
+        || Path::new("/etc/alpine-release").exists();
+    if musl {
+        "musl"
+    } else {
+        "gnu"
+    }
+}
+
+/// The server host triple for the running machine, libc-aware on Linux.
+pub fn native_host_triple(arch: &str, os: &str) -> Result<String, TripleError> {
+    host_triple_from_libc(arch, os, current_libc(os))
 }
 
 /// When no host toolchain exists for `triple`, pick the host the current
-/// machine can run via emulation (mac-x64 → arm host under Rosetta, win-arm64 →
-/// x64 host under WOW64). Returns `None` when nothing can run it (e.g. linux-arm64).
+/// machine can run via emulation (win-arm64 → x64 host under WOW64). Returns
+/// `None` when nothing can run it.
 pub fn host_fallback(triple: &str) -> Option<&'static str> {
-    if KNOWN_HOSTS.contains(&triple) {
+    if let Some(h) = KNOWN_HOSTS.iter().find(|h| **h == triple) {
         // Caller should normally check this first, but be forgiving.
-        return KNOWN_HOSTS.into_iter().find(|h| *h == triple);
+        return Some(*h);
     }
     match triple {
         // Windows on ARM runs x86_64 binaries via emulation.
@@ -91,7 +147,7 @@ impl fmt::Display for ResolvedHost {
 /// Resolve a native (arch, os) into a downloadable host, applying the fallback
 /// policy. `Ok(None)` means the platform is valid but no host can run on it.
 pub fn resolve_host(arch: &str, os: &str) -> Result<Option<ResolvedHost>, TripleError> {
-    let native = host_triple_from(arch, os)?;
+    let native = native_host_triple(arch, os)?;
     if KNOWN_HOSTS.contains(&native.as_str()) {
         return Ok(Some(ResolvedHost {
             host_archive: native.clone(),
@@ -136,8 +192,36 @@ mod tests {
 
     #[test]
     fn ios_maps_to_macosx_and_android_to_linux() {
-        assert_eq!(server_os("ios").unwrap(), "apple-macosx");
-        assert_eq!(server_os("android").unwrap(), "unknown-linux-gnu");
+        assert_eq!(server_os("ios", None).unwrap(), "apple-macosx");
+        assert_eq!(server_os("android", None).unwrap(), "unknown-linux-gnu");
+    }
+
+    #[test]
+    fn linux_libc_selects_gnu_or_musl() {
+        assert_eq!(
+            host_triple_from_libc("aarch64", "linux", Some("musl")).unwrap(),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            host_triple_from_libc("aarch64", "linux", Some("gnu")).unwrap(),
+            "aarch64-unknown-linux-gnu"
+        );
+        // No libc info → default to glibc.
+        assert_eq!(
+            host_triple_from_libc("aarch64", "linux", None).unwrap(),
+            "aarch64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn known_hosts_cover_linux_arm_and_riscv() {
+        for h in [
+            "aarch64-unknown-linux-gnu",
+            "aarch64-unknown-linux-musl",
+            "riscv64-unknown-linux-gnu",
+        ] {
+            assert!(KNOWN_HOSTS.contains(&h), "{h} missing from KNOWN_HOSTS");
+        }
     }
 
     #[test]
@@ -159,12 +243,11 @@ mod tests {
     }
 
     #[test]
-    fn all_three_known_hosts_resolve_directly() {
-        for h in KNOWN_HOSTS {
-            assert!(KNOWN_HOSTS.contains(&h));
-        }
+    fn linux_x86_64_resolves_directly() {
+        // libc-aware: gnu on a glibc runner, musl on Alpine — assert the shape,
+        // not the exact flavour, so the test is independent of the build host.
         let r = resolve_host("x86_64", "linux").unwrap().unwrap();
-        assert_eq!(r.host_archive, "x86_64-unknown-linux-gnu");
+        assert!(r.native.starts_with("x86_64-unknown-linux-"));
         assert!(!r.via_emulation);
     }
 
@@ -186,8 +269,11 @@ mod tests {
     }
 
     #[test]
-    fn linux_arm64_has_no_host() {
-        // Valid triple, but no host can run it → None (not an error).
-        assert_eq!(resolve_host("aarch64", "linux").unwrap(), None);
+    fn linux_arm64_now_has_a_host() {
+        // Previously excluded; the SDK ships aarch64 Linux host toolchains, so this
+        // must resolve to a native host (gnu or musl) rather than None.
+        let r = resolve_host("aarch64", "linux").unwrap().unwrap();
+        assert!(r.native.starts_with("aarch64-unknown-linux-"));
+        assert!(!r.via_emulation);
     }
 }

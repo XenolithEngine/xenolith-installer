@@ -119,7 +119,7 @@ fn detect(ctx: &Ctx) -> Result<String, CliError> {
 }
 
 fn native_id(ctx: &Ctx) -> Option<String> {
-    triple::host_triple_from(&ctx.arch, &ctx.os).ok()
+    triple::native_host_triple(&ctx.arch, &ctx.os).ok()
 }
 
 fn list(ctx: &Ctx) -> Result<String, CliError> {
@@ -178,39 +178,44 @@ fn kind_label(kind: Kind) -> &'static str {
     }
 }
 
-/// Install one toolchain component by triple. The same triple can be both a host
-/// toolchain and a target sysroot, so `--host`/`--target` disambiguate; with
-/// neither flag we install the sole match, or error if it's ambiguous.
+/// Install toolchain components by triple. The same triple can be both a host
+/// toolchain and a target sysroot; `--host`/`--target` install exactly one, while
+/// with neither flag we install whichever exist — both, when the triple is both.
 fn install(ctx: &Ctx, id: &str, want_host: bool, want_target: bool) -> Result<String, CliError> {
     let (manifest, _) = fetch_manifest(ctx)?;
     let has_host = manifest.find_kind(id, Kind::Host).is_some();
     let has_target = manifest.find_kind(id, Kind::Target).is_some();
 
-    let kind = if want_host {
+    // Which kinds to install. A flag narrows to exactly one; without a flag we
+    // install every kind that exists under this id — a triple that is both a host
+    // toolchain and a target (building on the same platform you ship to) gets both,
+    // instead of forcing the user to run the command twice.
+    let kinds: Vec<Kind> = if want_host {
         if !has_host {
             return Err(CliError::Other(format!(
                 "no host toolchain '{id}' in the catalogue"
             )));
         }
-        Kind::Host
+        vec![Kind::Host]
     } else if want_target {
         if !has_target {
             return Err(CliError::Other(format!(
                 "no target '{id}' in the catalogue"
             )));
         }
-        Kind::Target
+        vec![Kind::Target]
     } else {
-        match (has_host, has_target) {
-            (true, true) => {
-                return Err(CliError::Other(format!(
-                    "'{id}' exists as both a host toolchain and a target — pass --host or --target"
-                )))
-            }
-            (true, false) => Kind::Host,
-            (false, true) => Kind::Target,
-            (false, false) => return Err(CliError::Other(format!("unknown component: {id}"))),
+        let mut ks = Vec::new();
+        if has_host {
+            ks.push(Kind::Host);
         }
+        if has_target {
+            ks.push(Kind::Target);
+        }
+        if ks.is_empty() {
+            return Err(CliError::Other(format!("unknown component: {id}")));
+        }
+        ks
     };
 
     let installer = Installer {
@@ -220,11 +225,17 @@ fn install(ctx: &Ctx, id: &str, want_host: bool, want_target: bool) -> Result<St
         remote_base: ctx.remote_base.clone(),
         release: ctx.release.clone(),
     };
-    install_component_named(ctx, &installer, &manifest, id, kind, kind_label(kind))?;
+    for kind in &kinds {
+        install_component_named(ctx, &installer, &manifest, id, *kind, kind_label(*kind))?;
+    }
+    let labels = kinds
+        .iter()
+        .map(|k| kind_label(*k))
+        .collect::<Vec<_>>()
+        .join(" + ");
     Ok(format!(
-        "{} {id} ({})",
-        ctx.i18n.get("status-installed"),
-        kind_label(kind)
+        "{} {id} ({labels})",
+        ctx.i18n.get("status-installed")
     ))
 }
 
@@ -589,6 +600,35 @@ mod tests {
             )
     }
 
+    /// A transport where one triple exists as BOTH a host toolchain and a target.
+    fn transport_host_and_target(archive: &[u8]) -> MockTransport {
+        let id = "aarch64-unknown-linux-gnu";
+        let listing = format!(
+            "-rw-r--r-- 1 0 0 {} Jun 08 19:39 {id}.tar.xz\n\
+             -rw-r--r-- 1 0 0 3 Jun 08 19:40 {id}.tar.xz.sig",
+            archive.len()
+        );
+        MockTransport::new()
+            .with_listing("/releases/sdk-v0alpha0/hosts/", &listing)
+            .with_listing("/releases/sdk-v0alpha0/targets/", &listing)
+            .with_file(
+                &format!("/releases/sdk-v0alpha0/hosts/{id}.tar.xz"),
+                archive,
+            )
+            .with_file(
+                &format!("/releases/sdk-v0alpha0/hosts/{id}.tar.xz.sig"),
+                b"sig",
+            )
+            .with_file(
+                &format!("/releases/sdk-v0alpha0/targets/{id}.tar.xz"),
+                archive,
+            )
+            .with_file(
+                &format!("/releases/sdk-v0alpha0/targets/{id}.tar.xz.sig"),
+                b"sig",
+            )
+    }
+
     #[test]
     fn detect_reports_native_host() {
         let t = MockTransport::new();
@@ -674,6 +714,62 @@ mod tests {
             &ctx
         )
         .is_err());
+    }
+
+    #[test]
+    fn install_no_flag_installs_both_host_and_target() {
+        let archive = linux_archive();
+        let t = transport_host_and_target(&archive);
+        let v = AcceptAll;
+        let home = tempfile::tempdir().unwrap();
+        let ctx = ctx_with(&t, &v, home.path(), "aarch64", "linux");
+
+        let msg = run(
+            &Command::Install {
+                id: Some("aarch64-unknown-linux-gnu".into()),
+                host: false,
+                target: false,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert!(msg.contains("host toolchain"), "got: {msg}");
+        assert!(msg.contains("target"), "got: {msg}");
+
+        let store = ctx.layout.toolchains_store_dir();
+        assert!(store
+            .join("hosts/aarch64-unknown-linux-gnu/bin/xenolith")
+            .exists());
+        assert!(store
+            .join("targets/aarch64-unknown-linux-gnu/bin/xenolith")
+            .exists());
+    }
+
+    #[test]
+    fn install_host_flag_installs_only_the_host() {
+        let archive = linux_archive();
+        let t = transport_host_and_target(&archive);
+        let v = AcceptAll;
+        let home = tempfile::tempdir().unwrap();
+        let ctx = ctx_with(&t, &v, home.path(), "aarch64", "linux");
+
+        run(
+            &Command::Install {
+                id: Some("aarch64-unknown-linux-gnu".into()),
+                host: true,
+                target: false,
+            },
+            &ctx,
+        )
+        .unwrap();
+
+        let store = ctx.layout.toolchains_store_dir();
+        assert!(store
+            .join("hosts/aarch64-unknown-linux-gnu/bin/xenolith")
+            .exists());
+        assert!(!store
+            .join("targets/aarch64-unknown-linux-gnu/bin/xenolith")
+            .exists());
     }
 
     #[test]

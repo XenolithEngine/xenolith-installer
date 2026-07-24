@@ -10,6 +10,16 @@ follows [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0
 - **Linux ARM64 CLI builds** — `xenolith-installer-cli-aarch64-unknown-linux-musl.tar.gz`
   is now published, so ARM servers and containers no longer have to build from source.
 
+### Fixed
+- **`detect` recognises every SDK host.** The offline host list was stale (only
+  4 triples), so on Linux ARM64 and RISC-V it wrongly reported "no SDK host
+  available" even though the toolchains exist. It now covers the full `sdk-v0beta1`
+  host set and detects the machine's libc (gnu vs musl) so it picks a host that
+  actually runs on the box.
+- **`install <triple>` no longer errors when a triple is both a host and a target.**
+  With no `--host`/`--target` flag it now installs both in one go (a triple you both
+  build on and ship to); a flag still narrows it to exactly one.
+
 ### Changed
 - **Linux CLI binaries are now statically linked (musl).** The previous
   `x86_64-unknown-linux-gnu` build linked `libc`/`libm`/`libgcc_s` dynamically and
