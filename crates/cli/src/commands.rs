@@ -47,6 +47,7 @@ pub enum Command {
         path: String,
         target: Option<String>,
         run: bool,
+        release: bool,
     },
     /// Validate the installed-state registry against the filesystem.
     Verify,
@@ -68,6 +69,8 @@ pub struct Ctx<'a> {
     /// Native arch/os, injected for testability (real `main` uses `std::env::consts`).
     pub arch: String,
     pub os: String,
+    /// Explicit `--engine` override (also `$XENOLITH_ENGINE` / settings).
+    pub engine: Option<std::path::PathBuf>,
 }
 
 impl Ctx<'_> {
@@ -104,7 +107,12 @@ pub fn run(cmd: &Command, ctx: &Ctx) -> Result<String, CliError> {
         } => install(ctx, id, *host, *target),
         Command::Install { id: None, .. } => provision(ctx),
         Command::New { name, location } => new_project(ctx, name, location),
-        Command::Build { path, target, run } => build(ctx, path, target.as_deref(), *run),
+        Command::Build {
+            path,
+            target,
+            run,
+            release,
+        } => build(ctx, path, target.as_deref(), *run, *release),
         Command::Verify => verify(ctx),
         Command::Update => update(ctx),
     }
@@ -286,38 +294,62 @@ fn provision(ctx: &Ctx) -> Result<String, CliError> {
     ))
 }
 
-/// `install engine`: download just the engine bundle (no toolchains).
+/// `install engine`: download the baked bundle, or register a local `--engine` path.
 fn install_engine(ctx: &Ctx) -> Result<String, CliError> {
     let short = ensure_engine_cli(ctx)?;
-    Ok(format!(
-        "engine {short} installed.\n\
-         Add toolchains with `install <triple>`, or `install` to provision everything."
-    ))
+    if ctx.engine.is_some()
+        || std::env::var_os(provision::ENGINE_ENV).is_some_and(|v| !v.is_empty())
+    {
+        Ok(format!(
+            "using local engine ({short}).\n\
+             Add toolchains with `install <triple>`, or `install` to provision everything."
+        ))
+    } else {
+        Ok(format!(
+            "engine {short} installed.\n\
+             Add toolchains with `install <triple>`, or `install` to provision everything."
+        ))
+    }
 }
 
-/// Ensure the engine bundle is present, streaming coarse download progress to
-/// stderr. Returns the short version hash. Shared by `install` and `install engine`.
+/// Ensure the engine is present (baked download, or a local `--engine` /
+/// `$XENOLITH_ENGINE` / settings path). Returns a short label for the OK line.
 fn ensure_engine_cli(ctx: &Ctx) -> Result<String, CliError> {
-    eprintln!("• Engine ({})", provision::ENGINE_REF);
+    let label = ctx
+        .engine
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| provision::ENGINE_REF.to_string());
+    eprintln!("• Engine ({label})");
     let mut last = u64::MAX;
-    let info = provision::ensure_engine(&ctx.layout, false, &mut |bytes, total| {
-        let step = bytes / (512 * 1024);
-        if step != last {
-            last = step;
-            match total {
-                Some(t) if t > 0 => eprint!(
-                    "\r    {:>3.0}%  ({} / {} MB)   ",
-                    bytes as f64 / t as f64 * 100.0,
-                    bytes / 1_000_000,
-                    t / 1_000_000
-                ),
-                _ => eprint!("\r    {} MB   ", bytes / 1_000_000),
+    let info = provision::ensure_engine_with_override(
+        &ctx.layout,
+        ctx.engine.as_deref(),
+        false,
+        &mut |bytes, total| {
+            let step = bytes / (512 * 1024);
+            if step != last {
+                last = step;
+                match total {
+                    Some(t) if t > 0 => eprint!(
+                        "\r    {:>3.0}%  ({} / {} MB)   ",
+                        bytes as f64 / t as f64 * 100.0,
+                        bytes / 1_000_000,
+                        t / 1_000_000
+                    ),
+                    _ => eprint!("\r    {} MB   ", bytes / 1_000_000),
+                }
             }
-        }
-    })
+        },
+    )
     .map_err(CliError::Other)?;
-    eprintln!("\r    \u{2713} engine {}                    ", info.short());
-    Ok(info.short())
+    let short = if info.sha256.is_empty() {
+        info.reference.clone()
+    } else {
+        info.short()
+    };
+    eprintln!("\r    \u{2713} engine {short}                    ");
+    Ok(short)
 }
 
 /// Download + verify + extract the component with `id` of the given `kind`,
@@ -371,12 +403,13 @@ fn new_project(ctx: &Ctx, name: &str, location: &str) -> Result<String, CliError
     }
     let host = native_id(ctx)
         .ok_or_else(|| CliError::Other(format!("no SDK host for {}-{}", ctx.arch, ctx.os)))?;
-    let engine_root = ctx.layout.engine_dir(provision::ENGINE_REF);
-    if !engine_root.join("make/universal.mk").is_file() {
-        return Err(CliError::Other(
-            "engine not installed — run `xenolith-installer-cli install` first".into(),
-        ));
-    }
+    let engine_root =
+        provision::resolve_engine_root(&ctx.layout, ctx.engine.as_deref()).map_err(|e| {
+            CliError::Other(format!(
+                "{e} — run `xenolith-installer-cli install` or pass `--engine <path>`"
+            ))
+        })?;
+    let _ = install::link_toolchains_into_engine_path(&ctx.layout, &engine_root);
     let host_bin = component_dir(&ctx.layout, Kind::Host, &host).join("bin");
     if !host_bin.is_dir() {
         return Err(CliError::Other(format!(
@@ -398,7 +431,13 @@ fn new_project(ctx: &Ctx, name: &str, location: &str) -> Result<String, CliError
 }
 
 /// Build a project directory with the SDK toolchain; optionally run the result.
-fn build(ctx: &Ctx, path: &str, target: Option<&str>, run: bool) -> Result<String, CliError> {
+fn build(
+    ctx: &Ctx,
+    path: &str,
+    target: Option<&str>,
+    run: bool,
+    release: bool,
+) -> Result<String, CliError> {
     let proj = std::path::Path::new(path);
     if !proj.join("Makefile").is_file() {
         return Err(CliError::Other(format!(
@@ -409,7 +448,8 @@ fn build(ctx: &Ctx, path: &str, target: Option<&str>, run: bool) -> Result<Strin
     let host = native_id(ctx)
         .ok_or_else(|| CliError::Other(format!("no SDK host for {}-{}", ctx.arch, ctx.os)))?;
     let target = target.map(str::to_string).unwrap_or_else(|| host.clone());
-    let engine_root = ctx.layout.engine_dir(provision::ENGINE_REF);
+    let engine_root = provision::resolve_engine_root(&ctx.layout, ctx.engine.as_deref())
+        .map_err(CliError::Other)?;
     let host_bin = component_dir(&ctx.layout, Kind::Host, &host).join("bin");
     if !host_bin.is_dir() {
         return Err(CliError::Other(format!(
@@ -421,6 +461,7 @@ fn build(ctx: &Ctx, path: &str, target: Option<&str>, run: bool) -> Result<Strin
     }
     // Heal stale toolchain symlinks (e.g. after a data-root move) before building.
     let _ = install::relink_all_engines(&ctx.layout);
+    let _ = install::link_toolchains_into_engine_path(&ctx.layout, &engine_root);
 
     let mut path_dirs: Vec<std::path::PathBuf> = vec![host_bin];
     #[cfg(target_os = "windows")]
@@ -464,7 +505,17 @@ fn build(ctx: &Ctx, path: &str, target: Option<&str>, run: bool) -> Result<Strin
     } else if target != host {
         make.arg(format!("STAPPLER_TARGET={target}"));
     }
-    eprintln!("• Building {} for {target} (-j{jobs})…", proj.display());
+    // RELEASE=1 is a make command-line override: it propagates to the engine's
+    // sub-make (universal.mk forwards it), flips BUILD_TYPE to `release`
+    // (-O2 -DNDEBUG, no `-g`), and moves output to stappler-build/<target>/release/.
+    if release {
+        make.arg("RELEASE=1");
+    }
+    let build_type = if release { "release" } else { "debug" };
+    eprintln!(
+        "• Building {} for {target} ({build_type}, -j{jobs})…",
+        proj.display()
+    );
     let status = make.status().map_err(|e| CliError::Other(e.to_string()))?;
     let code = status.code().unwrap_or(-1);
     if code != 0 {
@@ -478,15 +529,18 @@ fn build(ctx: &Ctx, path: &str, target: Option<&str>, run: bool) -> Result<Strin
         ));
     }
     if run {
-        return run_built(proj, &target);
+        return run_built(proj, &target, build_type);
     }
-    Ok(format!("built {} for {target}", proj.display()))
+    Ok(format!(
+        "built {} for {target} ({build_type})",
+        proj.display()
+    ))
 }
 
 /// Run a freshly-built project binary. The CLI runs from a terminal (with full
 /// session/WindowServer access), so a direct exec shows the window fine — no
 /// LaunchServices dance is needed (unlike the packaged GUI).
-fn run_built(proj: &std::path::Path, target: &str) -> Result<String, CliError> {
+fn run_built(proj: &std::path::Path, target: &str, build_type: &str) -> Result<String, CliError> {
     let name = proj
         .file_name()
         .map(|s| projects::sanitize_name(&s.to_string_lossy()))
@@ -494,7 +548,7 @@ fn run_built(proj: &std::path::Path, target: &str) -> Result<String, CliError> {
     let out_dir = proj
         .join("stappler-build")
         .join(target)
-        .join("debug")
+        .join(build_type)
         .join(projects::host_cc_subdir());
     let candidates = [
         out_dir.join(format!("{name}.app/Contents/MacOS/{name}")),
@@ -574,6 +628,7 @@ mod tests {
             now: "2026-06-09T00:00:00Z".into(),
             arch: arch.into(),
             os: os.into(),
+            engine: None,
         }
     }
 

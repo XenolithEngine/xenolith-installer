@@ -2,13 +2,24 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "(lldb) Run",
+      "name": "(lldb) Debug",
       "type": "lldb-dap",
       "request": "launch",
-      "program": "${workspaceFolder}/{{BINARY_PATH}}",
+      "program": "${workspaceFolder}/{{BINARY_PATH_DEBUG}}",
       "args": [],
       "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal"
+      "console": "integratedTerminal",
+      "preLaunchTask": "xenolith: build (debug)"
+    },
+    {
+      "name": "(lldb) Release",
+      "type": "lldb-dap",
+      "request": "launch",
+      "program": "${workspaceFolder}/{{BINARY_PATH_RELEASE}}",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "xenolith: build (release)"
     }
   ]
 }

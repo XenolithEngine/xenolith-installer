@@ -283,9 +283,10 @@ export async function buildProject(
   path: string,
   target: string,
   run: boolean,
+  release = false,
 ): Promise<number> {
   if (!inTauri) return 0;
-  return invoke<number>("build_project", { path, target, run });
+  return invoke<number>("build_project", { path, target, run, release });
 }
 
 export async function onBuildLine(cb: (line: string) => void): Promise<UnlistenFn> {
@@ -349,6 +350,7 @@ export interface AppSettings {
   dataDir: string;
   defaultDataDir: string;
   dataDirOverride: string | null;
+  enginePath: string | null;
 }
 
 export async function getSettings(): Promise<AppSettings> {
@@ -360,6 +362,7 @@ export async function getSettings(): Promise<AppSettings> {
       dataDir: "~/.local/share/xenolith",
       defaultDataDir: "~/.local/share/xenolith",
       dataDirOverride: null,
+      enginePath: null,
     };
   }
   return invoke<AppSettings>("get_settings");
@@ -373,6 +376,11 @@ export async function setSettings(language: string | null, jobs: number | null):
 export async function setDataDir(path: string | null): Promise<void> {
   if (!inTauri) return;
   await invoke("set_data_dir", { path });
+}
+
+export async function setEnginePath(path: string | null): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_engine_path", { path });
 }
 
 // ---- dev fallbacks ----

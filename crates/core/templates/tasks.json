@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "xenolith: build (debug)",
+      "type": "shell",
+      "command": "{{HOST_BIN}}/{{MAKE_TOOL}}",
+      "args": ["-j8"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "STAPPLER_ROOT": "{{STAPPLER_ROOT}}"
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "xenolith: build (release)",
+      "type": "shell",
+      "command": "{{HOST_BIN}}/{{MAKE_TOOL}}",
+      "args": ["-j8", "RELEASE=1"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "STAPPLER_ROOT": "{{STAPPLER_ROOT}}"
+        }
+      },
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    }
+  ]
+}

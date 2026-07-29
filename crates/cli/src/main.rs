@@ -67,15 +67,21 @@ struct Cli {
     /// Install prefix override (otherwise `$XENOLITH_HOME` or OS default).
     #[arg(long, global = true)]
     prefix: Option<PathBuf>,
+    /// Use a local engine checkout as `STAPPLER_ROOT` instead of the baked
+    /// bundle (also: `$XENOLITH_ENGINE`, or Settings → Engine path).
+    #[arg(long, global = true)]
+    engine: Option<PathBuf>,
     /// Release server `host:port`.
     #[arg(long, global = true, default_value = "stappler.dev:21")]
     server: String,
     /// Remote directory holding `hosts/` and `targets/` (default: the latest release).
     #[arg(long, global = true)]
     base: Option<String>,
-    /// Release identifier (default: the latest release discovered on the server).
-    #[arg(long, global = true)]
-    release: Option<String>,
+    /// SDK catalogue release id (e.g. `sdk-v0beta0`). Not the app build mode —
+    /// that is `build --release`. Named `--sdk-release` so it does not clash with
+    /// clap's access of the build flag.
+    #[arg(long = "sdk-release", visible_alias = "catalog-release", global = true)]
+    sdk_release: Option<String>,
     /// DEV ONLY: skip signature verification. Never use for real installs.
     #[arg(long, global = true)]
     insecure_accept_unsigned: bool,
@@ -120,6 +126,9 @@ enum Sub {
         /// Run the built binary afterwards (native targets only).
         #[arg(long)]
         run: bool,
+        /// Build optimized (release: -O2 -DNDEBUG, no debug symbols) instead of debug.
+        #[arg(long)]
+        release: bool,
     },
     /// Validate the installed-state registry against the filesystem.
     Verify,
@@ -139,7 +148,17 @@ impl From<Sub> for Command {
                 name,
                 location: path,
             },
-            Sub::Build { path, target, run } => Command::Build { path, target, run },
+            Sub::Build {
+                path,
+                target,
+                run,
+                release,
+            } => Command::Build {
+                path,
+                target,
+                run,
+                release,
+            },
             Sub::Verify => Command::Verify,
             Sub::Update => Command::Update,
             // Intercepted in `main` before dispatch (it needs no FTP/key context).
@@ -232,13 +251,13 @@ fn main() -> ExitCode {
     // listing on `detect`/`new`/`build`/`verify`.
     let (remote_base, release) =
         if matches!(cli.command, Sub::List | Sub::Install { .. } | Sub::Update) {
-            resolve_base_release(&transport, cli.base.clone(), cli.release.clone())
+            resolve_base_release(&transport, cli.base.clone(), cli.sdk_release.clone())
         } else {
             (
                 cli.base
                     .clone()
                     .unwrap_or_else(|| format!("{RELEASES_ROOT}/{FALLBACK_RELEASE}")),
-                cli.release
+                cli.sdk_release
                     .clone()
                     .unwrap_or_else(|| FALLBACK_RELEASE.into()),
             )
@@ -254,6 +273,7 @@ fn main() -> ExitCode {
         now,
         arch: std::env::consts::ARCH.to_string(),
         os: std::env::consts::OS.to_string(),
+        engine: cli.engine.clone(),
     };
 
     match run(&cli.command.into(), &ctx) {

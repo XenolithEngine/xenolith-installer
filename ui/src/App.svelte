@@ -19,6 +19,7 @@
     getSettings,
     setSettings,
     setDataDir,
+    setEnginePath,
     setLang,
     pickFolder,
     diagnosticsReport,
@@ -104,11 +105,13 @@
     "settings-auto": "Auto",
     "settings-jobs": "Parallel build jobs",
     "settings-datadir": "Data directory",
+    "settings-engine": "Engine path",
+    "settings-engine-note": "Local xenolith-engine checkout used as STAPPLER_ROOT instead of the downloaded bundle. Leave empty for the baked snapshot.",
     "settings-reset": "Reset",
     "settings-restart": "Changing the data directory takes effect after a restart.",
     "datadir-no-space": "Path must not contain spaces",
     "path-no-space": "Path must not contain spaces",
-    "project-choose": "Choose…",
+    "build-mode": "Build mode",
     "engine-required": "Install the engine SDK and a host toolchain first",
     "create-requirements": "Install the engine, your host toolchain and a target (in Packages) before creating a project",
     "go-packages": "Go to Packages",
@@ -235,6 +238,24 @@
     await setDataDir(null);
     appSettings = await getSettings();
   }
+  async function chooseEnginePath() {
+    const dir = await pickFolder();
+    if (!dir) return;
+    if (/\s/.test(dir)) {
+      showToast(S["path-no-space"]);
+      return;
+    }
+    try {
+      await setEnginePath(dir);
+      appSettings = await getSettings();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function resetEnginePath() {
+    await setEnginePath(null);
+    appSettings = await getSettings();
+  }
 
   async function computeUpdateLabels() {
     if (!catalog) return;
@@ -272,7 +293,7 @@
     error = null;
     try {
       for (const row of selectedRows) {
-        progress[key(row)] = { id: row.id, phase: "downloading", bytes: 0 };
+        progress[key(row)] = { id: row.id, kind: row.kind, phase: "downloading", bytes: 0 };
         await install(row.id, row.kind);
         delete progress[key(row)];
         progress = { ...progress };
@@ -296,7 +317,7 @@
     error = null;
     try {
       for (const row of updatableRows) {
-        progress[key(row)] = { id: row.id, phase: "downloading", bytes: 0 };
+        progress[key(row)] = { id: row.id, kind: row.kind, phase: "downloading", bytes: 0 };
         await install(row.id, row.kind);
         delete progress[key(row)];
         progress = { ...progress };
@@ -363,7 +384,7 @@
     busy = true;
     error = null;
     try {
-      progress[key(row)] = { id: row.id, phase: "downloading", bytes: 0 };
+      progress[key(row)] = { id: row.id, kind: row.kind, phase: "downloading", bytes: 0 };
       await install(row.id, row.kind);
       setStatus(row, { status: "installed" });
     } catch (e) {
@@ -963,6 +984,18 @@
             {/if}
           </div>
           <span class="muted set-note">{S["settings-restart"]}</span>
+        </div>
+
+        <div class="set-row col">
+          <span class="set-label">{S["settings-engine"]}</span>
+          <code class="datadir">{appSettings.enginePath ?? "—"}</code>
+          <div class="set-control">
+            <button class="btn ghost sm" onclick={chooseEnginePath}>{S["project-choose"]}</button>
+            {#if appSettings.enginePath}
+              <button class="btn ghost sm" onclick={resetEnginePath}>{S["settings-reset"]}</button>
+            {/if}
+          </div>
+          <span class="muted set-note">{S["settings-engine-note"]}</span>
         </div>
 
         <div class="dialog-actions">

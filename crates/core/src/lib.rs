@@ -20,6 +20,7 @@ pub mod projects;
 #[cfg(feature = "engine")]
 pub mod provision;
 pub mod releases;
+pub mod settings;
 pub mod state;
 pub mod transport;
 #[cfg(feature = "ftp")]

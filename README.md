@@ -78,13 +78,26 @@ xenolith-installer-cli install <triple>          # one component (sole match by 
 xenolith-installer-cli install <triple> --host   # the host toolchain for <triple>
 xenolith-installer-cli install <triple> --target # the target sysroot for <triple>
 xenolith-installer-cli new <name> [--path <dir>] # scaffold a project (default: cwd)
-xenolith-installer-cli build <path> [--target <triple>] [--run]
+xenolith-installer-cli build <path> [--target <triple>] [--run] [--release]
 xenolith-installer-cli verify                    # validate the install registry
 xenolith-installer-cli update                    # components with a newer release
 xenolith-installer-cli self-update               # replace this binary with the latest release
 
-# Global: --lang <en|ru|zh>  --prefix <dir>  --server host:port  --release <id>
+# Global: --lang <en|ru|zh>  --prefix <dir>  --engine <path>  --server host:port  --sdk-release <id>
 ```
+
+`build --release` sets `RELEASE=1` (optimized `-O2 -DNDEBUG`, output under
+`stappler-build/<target>/release/`). Default is debug.
+
+`--engine <path>` (or `$XENOLITH_ENGINE`, or Settings → Engine path in the GUI)
+points `STAPPLER_ROOT` at a local [xenolith-engine](https://github.com/XenolithEngine/xenolith-engine)
+checkout instead of the baked `engine-snapshot` bundle — useful when iterating on
+the engine without re-publishing the snapshot. The path must contain
+`make/universal.mk` and must not contain spaces. Shared toolchains are still
+symlinked into `<engine>/toolchains/`.
+
+`--sdk-release <id>` selects the FTP catalogue release (e.g. `sdk-v0beta0`); it is
+separate from `build --release`.
 
 Installs are verified by default and **fail closed** without a pinned signing
 key. `--insecure-accept-unsigned` skips verification (development only).

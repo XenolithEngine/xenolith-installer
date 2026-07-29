@@ -162,6 +162,7 @@ pub fn sanitize_name(name: &str) -> String {
 const MAKEFILE_TMPL: &str = include_str!("../templates/Makefile.tmpl");
 const LAUNCH_TMPL: &str = include_str!("../templates/launch.json");
 const SETTINGS_TMPL: &str = include_str!("../templates/settings.json");
+const TASKS_TMPL: &str = include_str!("../templates/tasks.json");
 const SCENE_H: &str = include_str!("../templates/src/ExampleScene.h");
 const SCENE_CPP: &str = include_str!("../templates/src/ExampleScene.cpp");
 
@@ -210,8 +211,12 @@ pub fn host_cc_subdir() -> &'static str {
 
 /// Project-relative path of the built binary for the running OS. macOS produces
 /// an `.app` bundle; Windows a `.exe`; elsewhere a plain ELF binary.
-fn host_binary_rel(host_triple: &str, exe: &str) -> String {
-    let base = format!("stappler-build/{host_triple}/debug/{}", host_cc_subdir());
+/// `build_type` is `"debug"` or `"release"`.
+pub fn host_binary_rel(host_triple: &str, exe: &str, build_type: &str) -> String {
+    let base = format!(
+        "stappler-build/{host_triple}/{build_type}/{}",
+        host_cc_subdir()
+    );
     match std::env::consts::OS {
         "macos" => format!("{base}/{exe}.app/Contents/MacOS/{exe}"),
         "windows" => format!("{base}/{exe}.exe"),
@@ -275,10 +280,10 @@ pub fn scaffold(
     write_vscode(dir, engine_root, host_triple, host_bin, &exe, &make_bin)
 }
 
-/// Write `.vscode/{launch,settings}.json` for the project. These files are fully
-/// generated (no user content), so regenerating them is safe — unlike `src/` and
-/// the `Makefile`, which `scaffold` never clobbers. `make_bin` is the build-tool
-/// binary name that drives `makefile.makePath`.
+/// Write `.vscode/{launch,settings,tasks}.json` for the project. These files are
+/// fully generated (no user content), so regenerating them is safe — unlike
+/// `src/` and the `Makefile`, which `scaffold` never clobbers. `make_bin` is the
+/// build-tool binary name that drives `makefile.makePath`.
 fn write_vscode(
     dir: &Path,
     engine_root: &Path,
@@ -289,13 +294,18 @@ fn write_vscode(
 ) -> std::io::Result<()> {
     let vscode = dir.join(".vscode");
     std::fs::create_dir_all(&vscode)?;
-    let binary = host_binary_rel(host_triple, exe);
+    let binary_debug = host_binary_rel(host_triple, exe, "debug");
+    let binary_release = host_binary_rel(host_triple, exe, "release");
     let render_vscode = |tmpl: &str| {
         render(tmpl, engine_root, host_bin, host_triple, exe, make_bin)
-            .replace("{{BINARY_PATH}}", &binary)
+            .replace("{{BINARY_PATH_DEBUG}}", &binary_debug)
+            .replace("{{BINARY_PATH_RELEASE}}", &binary_release)
+            // Back-compat placeholder if any leftover template still uses it.
+            .replace("{{BINARY_PATH}}", &binary_debug)
     };
     std::fs::write(vscode.join("launch.json"), render_vscode(LAUNCH_TMPL))?;
     std::fs::write(vscode.join("settings.json"), render_vscode(SETTINGS_TMPL))?;
+    std::fs::write(vscode.join("tasks.json"), render_vscode(TASKS_TMPL))?;
     Ok(())
 }
 
@@ -421,11 +431,18 @@ mod tests {
         assert!(!settings.contains("/make\""));
         // binaryPath is OS-specific; the common prefix is present on every OS.
         assert!(settings.contains(&format!("stappler-build/{HOST}/debug/cc/My_Game")));
+        assert!(settings.contains(&format!("stappler-build/{HOST}/release/cc/My_Game")));
         assert!(!settings.contains("{{"));
         let launch = std::fs::read_to_string(proj.join(".vscode/launch.json")).unwrap();
         assert!(launch.contains("lldb-dap"));
         assert!(launch.contains(&format!("stappler-build/{HOST}/debug/cc/My_Game")));
+        assert!(launch.contains(&format!("stappler-build/{HOST}/release/cc/My_Game")));
+        assert!(launch.contains("xenolith: build (debug)"));
+        assert!(launch.contains("xenolith: build (release)"));
         assert!(!launch.contains("{{"));
+        let tasks = std::fs::read_to_string(proj.join(".vscode/tasks.json")).unwrap();
+        assert!(tasks.contains("RELEASE=1"));
+        assert!(!tasks.contains("{{"));
     }
 
     #[test]

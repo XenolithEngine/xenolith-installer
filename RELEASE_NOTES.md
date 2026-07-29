@@ -12,19 +12,21 @@ curl -fsSL https://raw.githubusercontent.com/XenolithEngine/xenolith-installer/m
 
 Then: `xenolith-installer-cli install` → `new myapp` → `build myapp --run`. (Desktop app and manual downloads are listed below.)
 
-### What's new in 0.1.5
+### What's new in 0.1.6
 
-- **The Linux CLI is now a static binary** — no system libraries at all. The previous
-  build linked glibc dynamically and needed GLIBC ≥ 2.34, so it refused to start on
-  Alpine, Ubuntu 20.04, Debian 11, RHEL 8 and most CI containers. The musl builds run
-  anywhere, which means `curl … | sh` now works inside a bare container.
-- **Linux ARM64 is now built** (`aarch64-unknown-linux-musl`). ARM servers, Raspberry-Pi-class
-  boards and ARM CI runners no longer have to compile the CLI from source — `install.sh`
-  picks the right binary automatically.
+- **Local engine checkout** — point the installer at a live
+  [xenolith-engine](https://github.com/XenolithEngine/xenolith-engine) tree instead of the
+  downloaded `engine-snapshot` bundle. Use **Settings → Engine path** in the GUI, CLI
+  `--engine <path>`, or `$XENOLITH_ENGINE`. Shared toolchains are still symlinked into that
+  tree's `toolchains/`, so you can iterate on the engine without re-publishing a snapshot.
+- **Release builds** — GUI Projects tab has a Debug / Release switch; CLI gains
+  `build … --release` (`RELEASE=1`, output under `stappler-build/<target>/release/`).
+- **VS Code / Cursor tasks** — new projects get `.vscode/tasks.json` plus separate debug
+  and release launch/Makefile configs, so F5 builds the matching mode first.
+- **`--sdk-release`** — the catalogue release flag was renamed from `--release` so it no
+  longer clashes with `build --release` (alias: `--catalog-release`).
 
-Everything else is unchanged from 0.1.4, which brought the full headless CLI flow
-(`install` → `new` → `build … --run`), the macOS `liblzma` launch fix, and automatic
-tracking of the latest SDK release.
+Linux static CLI / ARM64 CLI support from **0.1.5** is unchanged.
 
 ### Downloads
 
@@ -76,10 +78,10 @@ sudo mv xenolith-installer-cli /usr/local/bin/    # put it on your PATH
 ### What's inside
 
 - Browse and install **host toolchains + target sysroots** from the release server (GPG-verified, resumable).
-- One-click **engine SDK** download (set up as `STAPPLER_ROOT`); toolchains are shared across engine versions via symlinks.
-- **Projects**: create a graphical (Vulkan) window project in any folder, pick the engine version and build target, **Build / Run**, and **Open in** VS Code / Cursor / Claude Code or your file manager.
-- Generated `.vscode/` config (clangd + lldb-dap wired to the toolchain) and `.clang-format`.
-- English / Russian UI (follows the system locale).
+- One-click **engine SDK** download (set up as `STAPPLER_ROOT`); toolchains are shared across engine versions via symlinks — or point at a local checkout (see above).
+- **Projects**: create a graphical (Vulkan) window project in any folder, pick the engine version and build target, **Build / Run** (debug or release), and **Open in** VS Code / Cursor / Claude Code or your file manager.
+- Generated `.vscode/` config (clangd + lldb-dap + build tasks, wired to the toolchain) and `.clang-format`.
+- English / Russian / Chinese UI (follows the system locale).
 
 ### Known limitations
 

@@ -101,10 +101,14 @@ fn clear_link(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
-/// Symlink every toolchain from the shared store into one engine's `toolchains/`
-/// dir (refreshing existing links), so that engine's build can find them.
-pub fn link_toolchains_into_engine(layout: &Layout, engine_reference: &str) -> std::io::Result<()> {
-    let engine_tc = layout.engine_dir(engine_reference).join("toolchains");
+/// Symlink every toolchain from the shared store into an engine root's
+/// `toolchains/` dir (refreshing existing links), so that engine's build can
+/// find them. Works for both installed bundles and an external checkout.
+pub fn link_toolchains_into_engine_path(
+    layout: &Layout,
+    engine_root: &std::path::Path,
+) -> std::io::Result<()> {
+    let engine_tc = engine_root.join("toolchains");
     for kind in [Kind::Host, Kind::Target] {
         let store_kind = layout.toolchains_store_dir().join(kind.dir());
         if !store_kind.is_dir() {
@@ -122,6 +126,12 @@ pub fn link_toolchains_into_engine(layout: &Layout, engine_reference: &str) -> s
         }
     }
     Ok(())
+}
+
+/// Symlink every toolchain from the shared store into one installed engine's
+/// `toolchains/` dir (refreshing existing links).
+pub fn link_toolchains_into_engine(layout: &Layout, engine_reference: &str) -> std::io::Result<()> {
+    link_toolchains_into_engine_path(layout, &layout.engine_dir(engine_reference))
 }
 
 /// Refresh toolchain links in every installed engine — call after a toolchain is

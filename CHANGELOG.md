@@ -4,6 +4,30 @@ All notable changes to the Xenolith Installer are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0
 (alpha), so layouts and interfaces may still change between releases.
 
+## [0.1.6] — 2026-07-30
+
+### Added
+- **Local engine path override** — use a live xenolith-engine checkout as
+  `STAPPLER_ROOT` instead of the baked snapshot. Precedence: CLI `--engine` →
+  `$XENOLITH_ENGINE` → Settings → Engine path → bundled `data/engines/master`.
+  Toolchains are symlinked into the external tree; invalid paths (missing
+  `make/universal.mk`, or spaces) are rejected.
+- **Release builds** — GUI Debug/Release toggle on the Projects tab; CLI
+  `build … --release` passes `RELEASE=1` and runs the binary from
+  `stappler-build/<target>/release/`.
+- **`.vscode/tasks.json`** on scaffold, plus separate debug/release launch and
+  Makefile configurations (`preLaunchTask` builds the matching mode).
+
+### Changed
+- CLI catalogue flag renamed **`--sdk-release`** (alias `--catalog-release`);
+  the old `--release` name now belongs to `build --release`.
+- Settings (`language`, `jobs`, `enginePath`) live in shared core
+  `settings.json`, used by both CLI and GUI.
+
+### Documentation
+- README documents `--engine`, `$XENOLITH_ENGINE`, `build --release`, and the
+  `--sdk-release` rename.
+
 ## [0.1.5] — 2026-07-22
 
 ### Added
@@ -76,6 +100,8 @@ follows [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0
 ## [0.1.3] and earlier
 See the [GitHub releases] for prior history.
 
+[0.1.6]: https://github.com/XenolithEngine/xenolith-installer/releases/tag/v0.1.6
+[0.1.5]: https://github.com/XenolithEngine/xenolith-installer/releases/tag/v0.1.5
 [0.1.4]: https://github.com/XenolithEngine/xenolith-installer/releases/tag/v0.1.4
 [GitHub releases]: https://github.com/XenolithEngine/xenolith-installer/releases
 [#1]: https://github.com/XenolithEngine/xenolith-installer/issues/1

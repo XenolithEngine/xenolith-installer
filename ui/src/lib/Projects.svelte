@@ -47,6 +47,8 @@
 
   // Per-project selected build target (defaults to the host).
   let selTarget = $state<Record<string, string>>({});
+  /** Optimized release build (`RELEASE=1`) vs default debug. */
+  let releaseBuild = $state(false);
   let buildingPath = $state<string | null>(null);
   let log = $state<string[]>([]);
 
@@ -164,7 +166,7 @@
     log = [];
     error = null;
     try {
-      await buildProject(p.path, targetOf(p), run);
+      await buildProject(p.path, targetOf(p), run, releaseBuild);
     } catch (e) {
       error = String(e);
     } finally {
@@ -311,14 +313,30 @@
   {:else}
     <div class="list-head">
       <h2>{S["nav-projects"]}</h2>
-      <button
-        class="btn primary"
-        onclick={() => (view = "new")}
-        disabled={!ready}
-        title={!ready ? S["create-requirements"] : ""}
-      >
-        + {S["project-new"]}
-      </button>
+      <div class="list-head-actions">
+        <div class="seg" title={S["build-mode"] ?? "Build mode"}>
+          <button
+            class="seg-btn"
+            class:on={!releaseBuild}
+            onclick={() => (releaseBuild = false)}
+            disabled={!!buildingPath}
+          >Debug</button>
+          <button
+            class="seg-btn"
+            class:on={releaseBuild}
+            onclick={() => (releaseBuild = true)}
+            disabled={!!buildingPath}
+          >Release</button>
+        </div>
+        <button
+          class="btn primary"
+          onclick={() => (view = "new")}
+          disabled={!ready}
+          title={!ready ? S["create-requirements"] : ""}
+        >
+          + {S["project-new"]}
+        </button>
+      </div>
     </div>
 
     {#if !ready}
@@ -546,6 +564,33 @@
   }
   .list-head h2 {
     margin: 0;
+  }
+  .list-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--xeno-border-muted);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .seg-btn {
+    border: 0;
+    background: transparent;
+    color: var(--xeno-text-secondary);
+    padding: 5px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .seg-btn.on {
+    background: var(--xeno-accent, #3d7eff);
+    color: #fff;
+  }
+  .seg-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .form {
     display: flex;

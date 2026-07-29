@@ -11,14 +11,23 @@
   "makefile.makePath": "{{HOST_BIN}}/{{MAKE_TOOL}}",
   "makefile.configurations": [
     {
-      "name": "Xenolith",
+      "name": "Xenolith (debug)",
       "makeArgs": ["-j8"]
+    },
+    {
+      "name": "Xenolith (release)",
+      "makeArgs": ["-j8", "RELEASE=1"]
     }
   ],
   "makefile.launchConfigurations": [
     {
       "cwd": "${workspaceFolder}",
-      "binaryPath": "${workspaceFolder}/{{BINARY_PATH}}",
+      "binaryPath": "${workspaceFolder}/{{BINARY_PATH_DEBUG}}",
+      "binaryArgs": []
+    },
+    {
+      "cwd": "${workspaceFolder}",
+      "binaryPath": "${workspaceFolder}/{{BINARY_PATH_RELEASE}}",
       "binaryArgs": []
     }
   ],

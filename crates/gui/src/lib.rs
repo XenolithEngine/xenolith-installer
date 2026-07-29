@@ -2,7 +2,7 @@
 //! the heavy FTP/verify/extract work runs on a blocking thread and progress is
 //! pushed to the webview as events.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -18,7 +18,8 @@ use xenolith_installer_core::{
     key_source,
     manifest::{self, Kind},
     projects::{self, Project, ProjectRegistry},
-    releases,
+    provision, releases,
+    settings::Settings,
     state::InstalledState,
     transport::Transport,
     transport_ftp::FtpTransport,
@@ -177,26 +178,10 @@ fn data_root_override() -> Option<std::path::PathBuf> {
     (!trimmed.is_empty()).then(|| std::path::PathBuf::from(trimmed))
 }
 
-/// Persisted UI/build settings, stored at `<config>/settings.json` (the data-root
-/// override is NOT here — see `data_root_bootstrap`).
-#[derive(Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Settings {
-    /// Forced UI language ("en"/"ru"); None = follow the system locale.
-    language: Option<String>,
-    /// Forced `make -j` job count; None = one per logical CPU.
-    jobs: Option<u32>,
-}
-
-fn settings_path(layout: &Layout) -> std::path::PathBuf {
-    layout.config.join("settings.json")
-}
-
 fn load_settings() -> Settings {
     layout()
         .ok()
-        .and_then(|l| std::fs::read(settings_path(&l)).ok())
-        .and_then(|b| serde_json::from_slice(&b).ok())
+        .map(|l| Settings::load(&l))
         .unwrap_or_default()
 }
 
@@ -271,9 +256,28 @@ async fn prepare_engine(app: AppHandle) -> Result<EngineDto, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Ensure the engine bundle (STAPPLER_ROOT) is unpacked. Returns the recorded
-/// version without re-downloading if it is already present, unless `force`.
+/// Ensure the engine is available. With a local override (`settings.engine_path`
+/// / `$XENOLITH_ENGINE`) the baked bundle is not downloaded.
 fn ensure_engine(app: &AppHandle, layout: &Layout, force: bool) -> Result<EngineInfo, String> {
+    // Local override — link toolchains and return without downloading.
+    if let Ok(root) = provision::resolve_engine_root(layout, None) {
+        if provision::is_external_engine(layout, &root) {
+            log::info!("ensure_engine: using local {}", root.display());
+            install::link_toolchains_into_engine_path(layout, &root).map_err(|e| e.to_string())?;
+            let _ = app.emit(
+                "engine://progress",
+                EngineProgressDto {
+                    phase: "done",
+                    bytes: 0,
+                    total: 0,
+                },
+            );
+            return Ok(EngineInfo {
+                reference: format!("local:{}", root.display()),
+                sha256: String::new(),
+            });
+        }
+    }
     if !force {
         if let Some(info) = read_engine_info(layout) {
             if layout.engine_dir(ENGINE_REF).join("make").is_dir() {
@@ -611,6 +615,8 @@ struct SettingsDto {
     data_dir: String,
     default_data_dir: String,
     data_dir_override: Option<String>,
+    /// Local engine checkout override (`STAPPLER_ROOT`); `None` = baked bundle.
+    engine_path: Option<String>,
 }
 
 fn root_of(layout: &Layout) -> String {
@@ -636,26 +642,46 @@ fn get_settings() -> Result<SettingsDto, String> {
         data_dir,
         default_data_dir,
         data_dir_override: data_root_override().map(|p| p.display().to_string()),
+        engine_path: s.engine_path.map(|p| p.display().to_string()),
     })
 }
 
 #[tauri::command]
 fn set_settings(language: Option<String>, jobs: Option<u32>) -> Result<(), String> {
-    let s = Settings {
-        language: language.filter(|l| !l.is_empty()),
-        jobs: jobs.filter(|n| *n >= 1),
-    };
-    log::info!("set_settings language={:?} jobs={:?}", s.language, s.jobs);
     let layout = layout()?;
-    let path = settings_path(&layout);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let mut s = Settings::load(&layout);
+    s.language = language.filter(|l| !l.is_empty());
+    s.jobs = jobs.filter(|n| *n >= 1);
+    log::info!(
+        "set_settings language={:?} jobs={:?} engine_path={:?}",
+        s.language,
+        s.jobs,
+        s.engine_path
+    );
+    s.save(&layout)
+}
+
+/// Persist (or clear) a local engine path override. Takes effect immediately
+/// for new builds; does not require a restart.
+#[tauri::command]
+fn set_engine_path(path: Option<String>) -> Result<(), String> {
+    let layout = layout()?;
+    match path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            if p.contains(char::is_whitespace) {
+                return Err("engine path must not contain spaces".into());
+            }
+            let root = std::path::PathBuf::from(&p);
+            provision::validate_engine_root(&root)?;
+            install::link_toolchains_into_engine_path(&layout, &root).map_err(|e| e.to_string())?;
+            log::info!("set_engine_path -> {p}");
+            provision::set_engine_path_override(&layout, Some(&root))
+        }
+        None => {
+            log::info!("set_engine_path -> cleared (use baked bundle)");
+            provision::set_engine_path_override(&layout, None)
+        }
     }
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&s).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())
 }
 
 /// Persist (or clear) the data-root override. Takes effect on the next launch.
@@ -723,7 +749,13 @@ fn diagnostics_report() -> Result<String, String> {
     let _ = writeln!(s, "Hosts    : {}", ids_of(&store.join("hosts")));
     let _ = writeln!(s, "Targets  : {}", ids_of(&store.join("targets")));
     let set = load_settings();
-    let _ = writeln!(s, "Settings : lang={:?} jobs={:?}", set.language, set.jobs);
+    let _ = writeln!(
+        s,
+        "Settings : lang={:?} jobs={:?} engine={:?}",
+        set.language,
+        set.jobs,
+        set.engine_path.as_ref().map(|p| p.display().to_string())
+    );
     let _ = writeln!(s, "\n--- installer.log (last 150 lines) ---");
     if let Ok(content) = std::fs::read_to_string(log_dir().join("installer.log")) {
         let lines: Vec<&str> = content.lines().collect();
@@ -858,7 +890,16 @@ fn project_dto(p: &Project) -> ProjectDto {
 
 #[tauri::command]
 fn project_engines() -> Result<Vec<String>, String> {
-    Ok(projects::installed_engines(&layout()?))
+    let layout = layout()?;
+    let mut engines = projects::installed_engines(&layout);
+    // Surface a configured local checkout so the create-project picker can use it.
+    if let Some(p) = Settings::load(&layout).engine_path {
+        let s = p.display().to_string();
+        if !engines.iter().any(|e| e == &s) {
+            engines.insert(0, s);
+        }
+    }
+    Ok(engines)
 }
 
 #[tauri::command]
@@ -917,10 +958,19 @@ fn create_project(
         return Err("project location must not contain spaces".into());
     }
     let layout = layout()?;
-    let engine_root = layout.engine_dir(&engine);
-    if !engine_root.join("make").is_dir() {
-        return Err(format!("engine '{engine}' is not installed"));
-    }
+    // `engine` may be a bundled ref (`master`) or an absolute local path.
+    let engine_root = if std::path::Path::new(&engine).is_absolute() {
+        let root = std::path::PathBuf::from(&engine);
+        provision::validate_engine_root(&root)?;
+        root
+    } else {
+        let root = layout.engine_dir(&engine);
+        if !root.join("make").is_dir() {
+            return Err(format!("engine '{engine}' is not installed"));
+        }
+        root
+    };
+    let _ = install::link_toolchains_into_engine_path(&layout, &engine_root);
     if !projects::is_valid_name(&name) {
         return Err(
             "project name must be non-empty and use only letters, digits, '-' or '_'".into(),
@@ -1234,7 +1284,8 @@ fn project_paths(path: &str) -> Result<(Project, std::path::PathBuf, std::path::
         .find(|p| p.path.to_str() == Some(path))
         .cloned()
         .ok_or_else(|| "project not found".to_string())?;
-    let engine_root = layout.engine_dir(&project.engine);
+    let engine_root = provision::resolve_project_engine_root(&layout, &project.engine)?;
+    let _ = install::link_toolchains_into_engine_path(&layout, &engine_root);
     let host = native_host()?;
     let host_bin = install::component_dir(&layout, Kind::Host, &host).join("bin");
     Ok((project, engine_root, host_bin))
@@ -1476,16 +1527,23 @@ async fn build_project(
     path: String,
     target: String,
     run: bool,
+    release: bool,
 ) -> Result<i32, String> {
-    tauri::async_runtime::spawn_blocking(move || build_blocking(&app, &path, &target, run))
+    tauri::async_runtime::spawn_blocking(move || build_blocking(&app, &path, &target, run, release))
         .await
         .map_err(|e| e.to_string())?
 }
 
 /// Build a project for `target` (and optionally run it, only when `target` is the
 /// native host), streaming output as `build://line` events. Returns the exit code.
-fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Result<i32, String> {
-    log::info!("build_project path={path} target={target} run={run}");
+fn build_blocking(
+    app: &AppHandle,
+    path: &str,
+    target: &str,
+    run: bool,
+    release: bool,
+) -> Result<i32, String> {
+    log::info!("build_project path={path} target={target} run={run} release={release}");
     let layout = layout()?;
     // Heal toolchain links before building: older installs symlinked the store with
     // ABSOLUTE paths, so moving the data root (`~/.xenolith` → `~/.local/share/…`)
@@ -1512,7 +1570,8 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
         }
     }
 
-    let engine_root = layout.engine_dir(&project.engine);
+    let engine_root = provision::resolve_project_engine_root(&layout, &project.engine)?;
+    let _ = install::link_toolchains_into_engine_path(&layout, &engine_root);
     let host = native_host()?;
     let host_bin = install::component_dir(&layout, Kind::Host, &host).join("bin");
     if !host_bin.is_dir() {
@@ -1601,6 +1660,12 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
         // `make install` would skip the plist. Just select the target.
         make.arg(format!("STAPPLER_TARGET={target}"));
     }
+    // RELEASE=1 flips BUILD_TYPE to release (-O2 -DNDEBUG) and moves output
+    // under stappler-build/<target>/release/.
+    if release {
+        make.arg("RELEASE=1");
+    }
+    let build_type = if release { "release" } else { "debug" };
     let started = std::time::Instant::now();
     let code = stream_cmd(app, &mut make)?;
     // Report build wall-clock to the console (e.g. "✓ Built in 3m 21s").
@@ -1618,7 +1683,7 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
     let _ = app.emit(
         "build://line",
         BuildLineDto {
-            line: format!("{mark} in {dur} (exit {code})"),
+            line: format!("{mark} in {dur} (exit {code}, {build_type})"),
         },
     );
     // Run any native build (host or a same-arch variant like +sprt); a true
@@ -1634,7 +1699,7 @@ fn build_blocking(app: &AppHandle, path: &str, target: &str, run: bool) -> Resul
     let out_dir = std::path::Path::new(path)
         .join("stappler-build")
         .join(target)
-        .join("debug")
+        .join(build_type)
         .join(projects::host_cc_subdir());
     let candidates = [
         out_dir.join(format!("{exe_name}.app/Contents/MacOS/{exe_name}")), // macOS bundle
@@ -2046,6 +2111,7 @@ pub fn run() {
             get_settings,
             set_settings,
             set_data_dir,
+            set_engine_path,
             cancel_build,
             diagnostics_report,
             run_doctor,
